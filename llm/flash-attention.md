@@ -23,7 +23,7 @@ O \in \mathbb{R}^{T \times D}
 $$
 
 
-## Flash Attention
+## FlashAttention
 
 ## Tile in GEMM
 
