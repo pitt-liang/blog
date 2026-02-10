@@ -62,3 +62,6 @@ https://pytorch.org/blog/a-primer-on-llm-post-training/?ajs_aid=dc955daa-52f8-49
 
 - GPU mode：
 
+
+- model architecture
+

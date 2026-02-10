@@ -38,6 +38,19 @@ SharedMemory 是GPU上的片上缓存，和L1 cache是复用一份同一份物�
 寄存器：编译器自动分配，开发者几乎不可直接控制，只能通过编译参数和代码习惯间接影响。
 共享内存：完全由程序员通过 __shared__ 显式控制。
 
+- bank conflict
+
+- shared memory
+
+- TMA
+
+- warp specialization
+
+- FP4
+
+
+- CUTLASS/CuTe
+
 
 ## References
 
@@ -46,3 +59,5 @@ SharedMemory 是GPU上的片上缓存，和L1 cache是复用一份同一份物�
 
 - [What IS a GPU](https://jax-ml.github.io/scaling-book/gpus/#what-is-a-gpu)
 - [NVIDIA Tensor Core 的演变：从 Volta 到 Blackwell](https://zhuanlan.zhihu.com/p/1920552087932081548)
+
+- [Tutorial: Matrix Transpose in CuTe](https://research.colfax-intl.com/tutorial-matrix-transpose-in-cutlass/)
