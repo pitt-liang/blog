@@ -65,3 +65,7 @@ https://pytorch.org/blog/a-primer-on-llm-post-training/?ajs_aid=dc955daa-52f8-49
 
 - model architecture
 
+
+- https://www.youtube.com/playlist?list=PLoROMvodv4rOY23Y0BoGoBGgQ1zmU_MT_
+
+

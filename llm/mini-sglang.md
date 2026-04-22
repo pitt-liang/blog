@@ -2,11 +2,15 @@
 
 Mini-SGlang是SGlang的简版实现，基本覆盖了高性能LLM推理系统的主要模块，包括`KVCache/RadixAttention`，`Continous Batching`，`TensorParallel`，`Overlap Scheduling`，`高性能Kernel`， `CUDA Graphs`等主要特性。
 
-## Decoder Only Transformer的特性
+## Decoder-Only Transformer的特性
 
-在LLM 的训练阶段，模型的输入是 token ids($X \in \mathbb{R}^{B \times S}$, $S$为序列长度，$B$为batch size，单样本输入），输出对每个token位置上下一个token的logits( $y_t \in \mathbb{R}^{B \times S \times V}$ , $V$为vocab size），基于交叉熵获取序列上每一个token预测的loss，从而使得模型学会如何预测下一个token。
+目前主流LLM都是基于Decoder-Only Transformer，或者在Attention Layer上做改造，引入MQA，GQA，MLA等不同的attention机制，或者在FFN层引入MoE/Gate等，整体架构上还是基于Decoder-Only Transformer。
 
-而在推理（Inference）阶段，我们需要基于当前的输入序列，逐 token 地完成自回归（Autoregressive）生成。每一轮，我们将序列输入模型，获取输出的最后一个 token 的 logits 用于采样；采样得到新的 token 后，将其追加（append）到输入序列的末尾，再送入模型进行下一轮推理，直至生成结束 token。
+基于Decoder-Only的LLM的训练阶段，模型的输入是 token ids($X \in \mathbb{R}^{B \times S}$, $S$为序列长度，$B$为batch size，单样本输入），输出对每个token位置上下一个token的logits( $y_t \in \mathbb{R}^{B \times S \times V}$ , $V$为vocab size），基于交叉熵获取序列上每一个token预测的loss，从而使得模型学会如何预测下一个token。
+
+而在推理（Inference）阶段，模型需要基于当前的输入序列，逐 token 地完成自回归（Autoregressive）生成。每一轮，将序列输入模型后，获取输出的最后一个 token 的 logits 用于采样；采样得到新的 token 后，将其追加（append）到输入序列的末尾，再送入模型进行下一轮推理，直至生成结束 token。
+
+### KVCache 为何能够复用？
 
 Decoder-Only Transformer的模型推理流程可见下图，
 
@@ -19,13 +23,13 @@ Decoder-Only Transformer的模型推理流程可见下图，
 
 这个现象可以从LLM算子的特性来理解：
 
-**1. 绝大多数子层是Token-wise（逐词）计算**
+1. **绝大多数子层是Token-wise（逐词）计算**
 
 诸如 Embedding、LM Head、LayerNorm 以及 MLP（Gate/Up/Down）等组件，在每个位置$i$上都是对该位置的隐藏状态$h_i$进行独立变换（如线性投影、归一化、逐元素非线性激活等）。因此，当输入序列发生增量变化时，新增的 token 不会影响历史 token 的输出计算。
 
-PositionEmbedding/RoPE这是根据当前token的位置信息增加state，新增token不会影响历史token的计算。
+PositionEmbedding/RoPE则是根据当前token的位置信息增加state，新增token不会影响历史token的计算。
 
-**2. 在 Causal Mask 的自注意力中：新 token 不会影响历史 token 的 Attention Output**
+1. **在 Causal Mask 的自注意力中：新 token 不会影响历史 token 的 Attention Output**
 
 带有 Causal Mask 的 Scaled Dot-Product Attention 计算公式为：
 
@@ -37,7 +41,18 @@ $$
 
 $$A = \begin{bmatrix} A_{\text{hist}\to\text{hist}} & A_{\text{hist}\to\text{new}}\\ A_{\text{new}\to\text{hist}} & A_{\text{new}\to\text{new}} \end{bmatrix} $$
 
-在 Causal Mask ($M$) 的作用下，模型被禁止“历史 Query 看到未来 Key”。这意味着矩阵右上角的区域会被 Mask 为负无穷，经过 Softmax 后，$A_{\text{hist}\to\text{new}}$ 将变成全 0 权重矩阵。 因此，在第 $t$ 时刻，历史 token 的 Attention 输出为：
+分别表示历史对历史，历史对新增token，新增token对历史，新增token对新增token的Attention Score。
+
+在 Causal Mask ($M$) 的作用下，模型被禁止“历史 Query 看到未来 Key”。这意味着矩阵右上角的区域（历史对新增token的attention）会被 Mask 为负无穷，经过 Softmax 后，$A_{\text{hist}\to\text{new}}$ 将变成全 0 权重矩阵。
+
+$$A = \begin{bmatrix} A_{\text{hist}\to\text{hist}} & 0 \\ A_{\text{new}\to\text{hist}} & A_{\text{new}\to\text{new}} \end{bmatrix} $$
+
+因此，我们仅需计算Attention Score这一轮新增的 $A_{new}=\begin{bmatrix}A_{new \to hist} &  A_{new \to new}\end{bmatrix}$，同时因为
+ $$A_{\text{new}} = \text{softmax}(Q_{\text{new}} \cdot [K_{\text{hist}}, K_{\text{new}}]^\top)$$
+
+我们仅需当前token的Q和完整的K即可获取新增的Attention Score，不会有历史的Q参与Attention Score的计算，也就不会有所谓的Q Cache。
+
+获得的AttentionScore与V相乘即可获得Attention Output。 基于矩阵分块，我们可以获得历史AttentionOutput是由历史的Attention Score与所有的V相乘得到:
 
 $$
 O_{\text{hist}}^{(t)}
@@ -53,16 +68,21 @@ V_{\text{hist}} \\ V_{\text{new}}
 A_{\text{hist}\to\text{hist}} V_{\text{hist}}
 $$
 
-这个结果与序列长度为 $t-1$ 时计算出来的历史输出完全一致。这也说明了，追加新 token 不会改变任何历史 token 的 Attention Output。
+因为$A_{hist\to new}$为全0，因而(t)轮次的历史的Attention Output是不变的，他的完整的Attention输出也仅是Append上新的token的Attention Output。
 
 ![attention-output](resources/attention-output.png)
 
-这正是 KV Cache 得以复用的理论基础。在计算第 $t$ 轮的 Attention Output 时，我们无需重新计算历史 token 的特征。对于当前轮次，仅需计算最新输入 token 对应的 Query（记为 $q_t$），以及最新的 Key 和 Value（记为 $k_t$ 和 $v_t$），并将 $k_t$、$v_t$ 追加到已缓存的完整 K 和 V 中，即可用户完成这一轮 Attention Output 的计算，从而极大地节省了算力。
+这正是 KV Cache 得以复用的理论基础。在计算第 $t$ 轮的 Attention Output 时，我们需要所有token对应的K和V，因为K/V同样也是逐token得方式进行更新，因而我们可以复用上一轮的K/V，Append上新的token输入引入的额外的K/V,$k_t$ 和 $v_t$，即可获得完整的这一轮所需的K/V，完成这一轮AttentionOutput的计算，从而极大得节省了算力。
+
+### Prefill vs Decode
+
+基于以上的分析，我们也可以发现，每当我们做一轮新的token推理时，除了Attention Layer之外，是不需要关注历史的token信息的。而Attention Layer对于历史信息的使用，也可以基于K/V Cache获得。
+
+当一个新的序列输入，在第一次推理next token时，K/V cache是不存在的，因而需要基于完整的序列的输入，计算获得完整的序列对应的K和V，这个过程称为Prefill。
+
+而在下一轮推理中，则可以复用历史/上一轮已经获取的K/V，仅需计算当前轮次的$k_t$,和$v_t$，然后Append到历史的K/V中，参与Attention的计算，这个过程称为Decode。
 
 ## Continuous Batching
-
-
-
 
 ## KVCache Manager
 
@@ -404,7 +424,7 @@ Row Parallel 获取的数据并不能使用，需要一次All Reduce？ Column P
 
 - fused moe
 
-- 为什么不直接使用hidden state呢？
+- 计算
 
 ## References
 
