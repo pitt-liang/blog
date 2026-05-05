@@ -737,7 +737,7 @@ w_{t,j}^{I}\cdot
 \text{ReLU}(\mathbf{q}_{t,j}^{I}\cdot \mathbf{k}_{s}^{I})
 $$
 
-其中 $H^I$ 是 indexer heads 数量，$\mathbf{q}_{t,j}^{I}$ 和 $w_{t,j}^{I}$ 来自当前 query token，$\mathbf{k}_{s}^{I}$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
+其中 $`H^I`$ 是 indexer heads 数量，$`\mathbf{q}_{t,j}^{I}`$ 和 $`w_{t,j}^{I}`$ 来自当前 query token，$`\mathbf{k}_{s}^{I}`$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
 
 有了 $I_{t,s}$ 之后，DSA 只取 top-$k$ 对应的 KV entries：
 
