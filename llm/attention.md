@@ -651,7 +651,9 @@ $$
 NSA 额外保留局部窗口：
 
 $$
-\mathcal{K}^{win}_i=\{j\mid i-W<j\le i\}
+\mathcal{K}^{\mathrm{win}}_i
+{}={}
+\left\{j\mid i-W\lt j\le i\right\}
 $$
 
 这条 branch 负责最近邻 token。论文中特别强调，为了避免 local pattern 过强导致 compression / selection branch 学不到长程能力，三条 branch 使用相对独立的 K/V，并通过 gate 聚合。
