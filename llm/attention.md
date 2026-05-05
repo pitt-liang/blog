@@ -6,31 +6,29 @@
 1. [引言：为什么 Attention 是 LLM 的瓶颈](#intro)
 2. [Scaled Dot-Product / Causal Attention](#scaled-dot-product-attention)
    - [Scaled Dot-Product Attention](#scaled-dot-product-formula)
-   - [MHA](#mha)
+   - [Multi-Head Attention (MHA)](#mha)
    - [Causal Attention 与 KV Cache](#causal-attention-kv-cache)
    - [Prefill vs Decode](#prefill-vs-decode)
-3. [典型 LLM 的 Attention 选型](#llm-attention-choices)
+3. [Head/KV 表示压缩](#kv-compression)
+   - [Multi-Query Attention (MQA)](#mqa)
+   - [Grouped-Query Attention (GQA)](#gqa)
+   - [Multi-Head Latent Attention (MLA)](#mla)
+4. [长上下文 Attention 压缩](#long-context-attention-compression)
+   - [Sliding Window Attention (SWA)](#swa)
+   - [Native Sparse Attention (NSA)](#nsa)
+   - [DeepSeek Sparse Attention (DSA)](#dsa)
+   - [DeepSeek-V4 Hybrid Attention](#deepseek-v4-hybrid)
+   - [Gated DeltaNet (GDN)](#linear-attention-gdn)
+5. [典型 LLM 的 Attention 选型](#llm-attention-choices)
    - [模型速览](#llm-attention-table)
    - [几个趋势](#llm-attention-trends)
-4. [Head/KV 表示压缩](#kv-compression)
-   - [MQA](#mqa)
-   - [GQA](#gqa)
-   - [MLA](#mla)
-5. [长上下文连接稀疏化](#attention-sparsity)
-   - [SWA](#swa)
-   - [Sparse Attention](#sparse-attention)
-   - [NSA](#nsa)
-   - [DSA](#dsa)
-   - [DeepSeek-V4 Hybrid Attention](#deepseek-v4-hybrid)
-6. [Linear / Recurrent Attention](#linear-recurrent-route)
-   - [GDN](#linear-attention-gdn)
-7. [Kernel / 系统优化](#kernel-system-optimization)
+6. [Kernel / 系统优化](#kernel-system-optimization)
    - [FlashAttention](#flashattention)
+   - [FlexAttention](#flexattention)
    - [PagedAttention](#pagedattention)
    - [RadixAttention](#radixattention)
    - [Ring Attention](#ring-attention)
-   - [QK-Norm / RoPE 等易混概念](#related-tech)
-8. [References](#references)
+7. [References](#references)
 
 <a id="intro"></a>
 ## 引言：为什么 Attention 是 LLM 的瓶颈
@@ -83,7 +81,7 @@ $$
 如果 $q$ 和 $k$ 的每个维度近似独立，方差为 1，那么点积 $q \cdot k$ 的方差会随 $d$ 增大。直接把 $QK^T$ 输入 softmax，容易让 softmax 饱和，梯度变小。除以 $\sqrt{d}$ 的作用是稳定 score 的尺度，让训练更稳定。
 
 <a id="mha"></a>
-### MHA (Multi-Head Attention)
+### Multi-Head Attention (MHA)
 
 ![multi-head-attention](resources/attention-mha.png)
 
@@ -200,56 +198,12 @@ KV Cache 也解释了 LLM 推理中 Prefill 和 Decode 的区别。
 
 所以 KV Cache 的本质不是改变 attention 的数学结果，而是利用 causal mask 下“历史输出不变”的性质，避免重复计算历史 token 的 K/V 和历史 attention output。
 
-从这个基础出发，后续 attention 机制大致沿着三条模型侧路线演进：
+从这个基础出发，后续 attention 机制大致沿着两条模型侧路线演进：
 
 1. **Head/KV 表示压缩**：以 MHA 为 baseline，MQA/GQA/MLA 主要降低 decode 阶段 KV Cache 容量和 HBM 读取。
-2. **长上下文连接稀疏化**：Full Attention -> SWA -> Sparse/DSA -> DeepSeek-V4 CSA/HCA，主要减少每个 query 需要访问的历史 token/block 数量。
-3. **Linear / Recurrent Attention**：以 GatedDeltaNet 为代表，用递推 state 替代随上下文增长的 token-level KV Cache。
+2. **长上下文 Attention 压缩**：SWA/NSA/DSA/DeepSeek-V4 主要压缩每个 query 实际访问的历史 token/block；GatedDeltaNet 则把历史 token-level KV Cache 压成 recurrent state。
 
-FlashAttention、PagedAttention、RadixAttention、Ring Attention 等则属于另一类问题：它们不直接改变 attention 的数学语义，而是优化 exact attention 的 kernel IO、KV Cache 管理、prefix cache 复用或分布式执行。
-
-<a id="llm-attention-choices"></a>
-## 典型 LLM 的 Attention 选型
-
-下表主要参考 Sebastian Raschka 的 [The Big LLM Architecture Comparison](https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison)（最后更新于 2026-04-02），并结合各模型官方发布页、模型卡和本文前面对 DeepSeek-V4 的整理。这里只关注 text LLM 的 attention 选择，不展开 MoE、Norm、Tokenizer、MTP 等其它结构差异；发布时间按首次公开发布或主要权重发布排序。
-
-<a id="llm-attention-table"></a>
-### 模型速览
-
-| 发布时间 | 模型 / 系列 | Attention 选型 | 对应本文路线 | 备注 |
-| --- | --- | --- | --- | --- |
-| 2024-11-26 | OLMo 2 | MHA | Scaled Dot-Product / Causal Attention | 一个相对传统、透明的 baseline；后来 OLMo 2 32B variant 使用 GQA。 |
-| 2024-12-26 / 2025-01-20 | DeepSeek-V3 / R1 | MLA | Head/KV 表示压缩 | V3 首发 MLA 架构；R1 基于 V3 延续 MLA，进一步把 DeepSeek-style MLA 推到主流视野。 |
-| 2025-03-12 | Gemma 3 | GQA + SWA/full hybrid，约 5:1 | Head/KV 表示压缩 + 长上下文连接稀疏化 | 5 个 sliding-window local layer 后接 1 个 global/full attention layer；SWA window 从 Gemma 2 的 4096 降到 1024。 |
-| 2025-03-17 | Mistral Small 3.1 | GQA，默认不启用 SWA | Head/KV 表示压缩 | 相比早期 Mistral，Small 3.1 默认 `sliding_window=null`，更偏 regular GQA。 |
-| 2025-04-05 | Llama 4 | GQA | Head/KV 表示压缩 | 延续 Llama 系列常见的 GQA 路线。 |
-| 2025-04-29 | Qwen3 dense / MoE | GQA | Head/KV 表示压缩 | Raschka 文中也把 Qwen3 作为 GQA baseline 来对比 gpt-oss、Olmo 3、MiniMax-M2 等模型。 |
-| 2025-07 | Kimi K2 | MLA | Head/KV 表示压缩 | 架构接近 DeepSeek-V3，但调整了 MoE 与 MLA 规模；后续 K2 Thinking 延续 K2 系列路线。 |
-| 2025-08-05 | gpt-oss | GQA + SWA every other layer + attention sinks | Head/KV 表示压缩 + 长上下文连接稀疏化 | 与 Qwen3 都使用 GQA，但 gpt-oss 每隔一层限制上下文窗口，并加入 attention sink/bias 设计。 |
-| 2025-09-11 | Qwen3-Next | GatedDeltaNet + Gated Attention，约 3:1 | Linear/Recurrent + 标准 attention hybrid | 用 3 个 GatedDeltaNet block 搭配 1 个 gated attention block，降低长上下文 memory 成本。 |
-| 2025-10-27 | MiniMax-M2 | GQA + full softmax attention | Head/KV 表示压缩 + 标准 full attention | MiniMax-M1 曾使用 lightning attention；M2 为了 reasoning 和 multi-turn 质量回到常规 softmax attention，`sliding_window=null`，同时配置为 48 query heads / 8 KV heads 的 GQA。 |
-| 2025-10-30 | Kimi Linear | GatedDeltaNet + MLA，约 3:1 | Linear/Recurrent + MLA hybrid | 与 Qwen3-Next 相似，但 full attention 层用 MLA，而不是普通 gated attention。 |
-| 2025-11-20 | Olmo 3 7B / 32B | 7B: MHA + SWA；32B: GQA + SWA/global | MHA/GQA + 长上下文连接稀疏化 | 7B 延续 MHA，但加入 SWA 缩小 KV Cache；32B 改用 GQA。 |
-| 2025-12-01 | DeepSeek-V3.2 | MLA + Sparse Attention / DSA | Head/KV 表示压缩 + 长上下文连接稀疏化 | 在 V3 的 MLA 基础上加入稀疏 attention，面向长上下文效率。 |
-| 2025-12-02 | Mistral 3 Large | DeepSeek-V3-like MLA | Head/KV 表示压缩 | Raschka 文中认为它几乎采用 DeepSeek-V3/V3.1 架构，只调整 expert 尺寸和数量。 |
-| 2025-12 | Xiaomi MiMo-V2-Flash | SWA/full hybrid，约 5:1，window 128 | 长上下文连接稀疏化 | 使用比 Gemma 3 更激进的小窗口 SWA，被文中称为当时最大规模的 SWA 模型之一。 |
-| 2025-12 / 2026-03 | Nemotron 3 Nano / Super | Mamba-Transformer hybrid + 少量 GQA layers | Linear/state-space hybrid + GQA | 大量层用 Mamba-2/state-space 风格模块，只在少数层保留 GQA；Super 是后续更大版本。 |
-| 2026-01-27 | Arcee Trinity Large | SWA/global 约 3:1 + gated attention | 长上下文连接稀疏化 + gated attention | 类似 Gemma/Olmo/Xiaomi 的 local/global 交替，但比例为 3:1，窗口较大。 |
-| 2026-02 | Qwen3.5 | GatedDeltaNet + Softmax Attention，约 3:1 | Linear/Recurrent + 标准 attention hybrid | Qwen 官方站点描述为 75% GatedDeltaNet + 25% Softmax Attention，面向 256K 到 1M+ 长上下文。 |
-| 2026-02-11 / 2026-02-12 | GLM-5 | MLA + DeepSeek Sparse Attention | Head/KV 表示压缩 + 长上下文连接稀疏化 | Raschka 文中指出 GLM-5 采用 DeepSeek 的 MLA 与 sparse attention，以降低长上下文推理成本。 |
-| 2026-04-02 | Gemma 4 | GQA + SWA/full hybrid，约 5:1 | Head/KV 表示压缩 + 长上下文连接稀疏化 | 结构基本延续 Gemma 3；global attention 层还引入 K/V 复用细节。 |
-| 2026-04-24 | DeepSeek-V4 | CSA + HCA hybrid attention | 长上下文连接稀疏化 + KV 压缩 | 在本文前面单独展开：先做序列压缩，再做 hybrid sparse/full/local 组合。 |
-
-<a id="llm-attention-trends"></a>
-### 几个趋势
-
-从 2026-05 的视角看，这些模型体现出几个趋势：
-
-- **GQA 已经从“前沿创新”变成成熟 baseline**。Llama、Qwen3 dense/MoE、Gemma、Mistral Small、gpt-oss 等仍大量使用 GQA，因为它实现成熟、质量稳定、KV Cache 明显小于 MHA。但如果只看最新的前沿长上下文和 agent-oriented 架构，GQA 更像基础组件，而不是主要演进方向。
-- **MLA 正在成为前沿大规模 MoE / long-context LLM 的核心 KV 压缩方案**。DeepSeek-V3/R1、Kimi K2、Mistral 3 Large、GLM-5 都采用或接近 DeepSeek-style MLA。相比 GQA 只减少 KV heads，MLA 直接压缩历史 K/V 表示，在长上下文 decode 中更能缓解 KV Cache 容量和 HBM 读取压力。
-- **Sparse / Hybrid Attention 正在成为长上下文 agent 场景的重要路线**。DeepSeek-V3.2 的 DSA、DeepSeek-V4 的 CSA/HCA、Gemma/gpt-oss/Olmo/Xiaomi/Trinity 的 SWA/full hybrid，都说明前沿模型不再默认每层都做 full attention，而是把 full/global/local/sparse 连接组合起来，减少长上下文下实际读取和计算的 KV 数量。
-- **Linear / recurrent attention 从研究路线进入主流前沿模型栈**。Qwen3-Next、Qwen3.5 类模型、Kimi Linear、Nemotron 3、MiniMax-M1 都说明，GatedDeltaNet/Mamba-style state 能把随上下文线性增长的 KV Cache 压成固定或近似固定大小的 recurrent state。它们通常不会完全替代 softmax attention，而是以 3:1、local/global、或 state-space + attention 的 hybrid pattern 出现。
-- **Agent 场景正在推动 attention 从“质量优先”转向“质量 + 长上下文成本共同优化”**。多轮工具调用、代码仓库级上下文、长文档检索会把 KV Cache 容量、HBM 带宽和 prefill/decode 延迟同时放大。因此，MLA、Sparse Attention、Linear/Recurrent Attention 这些能降低长上下文 cache/访存成本的方案，正在比单纯的 GQA 更接近新一代架构主线。
+FlashAttention、FlexAttention、PagedAttention、RadixAttention、Ring Attention 等则属于另一类问题：它们不直接改变 attention 的数学语义，而是优化 exact attention 的 kernel IO、可编程 kernel 生成、KV Cache 管理、prefix cache 复用或分布式执行，本文最后单独放在 Kernel / 系统优化里讨论。
 
 <a id="kv-compression"></a>
 ## Head/KV 表示压缩
@@ -257,7 +211,7 @@ FlashAttention、PagedAttention、RadixAttention、Ring Attention 等则属于�
 本节以 MHA 为 baseline，讨论如何在不改变 causal attention 基本连接关系的前提下，压缩历史 K/V 的 head 数量或缓存表示，从而降低 decode 阶段 KV Cache 的容量和 HBM 读取。
 
 <a id="mqa"></a>
-### MQA (Multi-Query Attention)
+### Multi-Query Attention (MQA)
 
 ![multi-query-attention](resources/attention-mqa.png)
 
@@ -321,7 +275,7 @@ $$
 因此，MQA 是一个非常激进的推理优化：吞吐收益大，但质量风险也更高。
 
 <a id="gqa"></a>
-### GQA (Grouped Query Attention)
+### Grouped-Query Attention (GQA)
 
 ![grouped-query-attention](resources/attention-gqa.png)
 
@@ -371,7 +325,7 @@ $$
 这也是为什么 Llama、Mistral、Qwen、Gemma 等大量现代 LLM 都采用 GQA：它不是最省的方案，但通常是质量和 serving 成本之间最稳健的折中。
 
 <a id="mla"></a>
-### MLA (Multi-Head Latent Attention)
+### Multi-Head Latent Attention (MLA)
 
 ![multi-head-latent-attention](resources/attention-mla.png)
 
@@ -389,7 +343,7 @@ $$
 c_t^{KV} = x_t W_{DKV}
 $$
 
-其中 $c_t^{KV}$ 是低维 latent KV，维度为 $d_c$，通常显著小于 $H_qd$。$W_{UK,h}$ 可以看作 $d_c \times d_{nope}$，$W_{UV,h}$ 可以看作 $d_c \times d_v$。
+其中 $c_t^{KV}$ 是低维 latent KV，维度为 $d_c$，通常显著小于 $H_qd$。 $W_{UK,h}$ 可以看作 $d_c \times d_{nope}$, $W_{UV,h}$ 可以看作 $d_c \times d_v$。
 
 每个 head 的 non-RoPE key 和 value 由 latent up-projection 得到：
 
@@ -416,9 +370,7 @@ q_{t,h} = [q_{t,h}^{nope}; q_{t,h}^{R}]
 $$
 
 $$
-s_{t,j,h}
-= q_{t,h}^{nope} \cdot k_{j,h}^{nope}
-+ q_{t,h}^{R} \cdot k_j^R
+s_{t,j,h} = q_{t,h}^{nope} \cdot k_{j,h}^{nope} + q_{t,h}^{R} \cdot k_j^R
 $$
 
 以 DeepSeek-V3/R1 类配置为例，公开 config 中 `n_heads=128`，`kv_lora_rank=512`，`qk_nope_head_dim=128`，`qk_rope_head_dim=64`，`v_head_dim=128`。因此每个 head 的 Q/K 维度可以看成 $128$ 维 non-RoPE 部分加 $64$ 维 RoPE 部分，V 维度是 $128$。decode cache 主要保存：
@@ -529,13 +481,18 @@ $$
 
 因此，MLA 的关键是双模：训练 / prefill 侧保留 MHA-like 高吞吐计算；decode 侧使用 MQA-like latent-cache 计算，减少长上下文下的 KV Cache 访存和显存压力。
 
-<a id="attention-sparsity"></a>
-## 长上下文连接稀疏化
+<a id="long-context-attention-compression"></a>
+## 长上下文 Attention 压缩
 
-这条路线仍然保留 softmax attention 的基本形式，但减少每个 query 实际访问的历史 token/block 数量。SWA 是固定窗口稀疏；Sparse Attention/NSA/DSA 是更一般的稀疏化路线；DeepSeek-V4 在动态稀疏前进一步加入序列维度压缩。
+这部分讨论长上下文下的模型侧压缩。它包含两类不同但目标相近的做法：
+
+- **连接稀疏化 / 序列压缩**：仍然保留 softmax attention，但减少每个 query 实际访问的历史 token/block。SWA 是固定窗口稀疏；NSA/DSA 是动态稀疏；DeepSeek-V4 进一步先做序列维度压缩，再做 sparse / compressed attention。
+- **记忆状态化**：不再显式保留所有历史 token 的 K/V，而是把历史信息写入固定或近似固定大小的 recurrent state。GatedDeltaNet 是这条路线的代表。
+
+两者都面向长上下文效率，但压缩对象不同：前者压缩连接集合或序列长度，后者压缩历史记忆表示。
 
 <a id="swa"></a>
-### SWA (Sliding Window Attention)
+### Sliding Window Attention (SWA)
 
 ![sliding-window-attention](resources/attention-swa.png)
 
@@ -607,54 +564,9 @@ SWA 的关键风险是长距离信息传递。单层 SWA 看不到窗口外的 t
 
 Mistral 7B 是 SWA + GQA 的代表模型之一。它用 SWA 降低长序列推理成本，同时通过层间信息传递保留更长范围的上下文影响。
 
-<a id="sparse-attention"></a>
-### Sparse Attention
-
-Sparse Attention 的目标是减少每个 query 实际 attend 的 key/value 数量。标准 full attention 是：
-
-$$
-\mathcal{A}(i)=\{j \mid j \le i\}
-$$
-
-Sparse Attention 则把可见集合变成一个子集：
-
-$$
-\mathcal{A}(i) \subset \{j \mid j \le i\}
-$$
-
-输出为：
-
-$$
-O_i
-{}={}
-\text{softmax}\left(\frac{q_i K_{\mathcal{A}(i)}^T}{\sqrt{d}}\right)V_{\mathcal{A}(i)}
-$$
-
-如果每个 query 只看 $K_s$ 个 key，那么复杂度可以从 $O(S^2)$ 降到 $O(SK_s)$。
-
-#### 固定稀疏 vs 动态稀疏
-
-早期 sparse attention 常使用固定 pattern：
-
-- local window
-- dilated window
-- block sparse
-- global tokens
-- random tokens
-
-固定 pattern 的好处是 kernel 更容易做，负载更规则；问题是 token 重要性和任务相关，固定 pattern 可能漏掉关键上下文。
-
-动态稀疏则让模型或额外模块为每个 query 选择重要 token。它更灵活，但会引入新的问题：
-
-- token selection 本身有开销。
-- top-k / gather 可能导致不规则访存。
-- 不同 query 选择数量和位置不同，GPU workload 容易不均衡。
-- 训练时要让 sparse pattern 稳定收敛。
-
-现代 sparse attention 的难点不只是“少算”，而是“少算以后 GPU 真的更快，并且模型质量不掉”。
 
 <a id="nsa"></a>
-### NSA (Native Sparse Attention)
+### Native Sparse Attention (NSA)
 
 ![native-sparse-attention](resources/attention-nsa.png)
 
@@ -796,7 +708,7 @@ decode 阶段更偏 memory-bound。Full attention 每步需要读取全部历史
 这里的重点和 MLA 类似：长上下文 decode 的瓶颈经常是 HBM 读取，而不是单纯 MACs。NSA 通过 blockwise sparse KV 读取减少 memory access；同时通过 group-centric kernel loading 和 shared KV fetching，避免“理论 sparse，实际访存仍很散”的问题。
 
 <a id="dsa"></a>
-### DSA (DeepSeek Sparse Attention)
+### DeepSeek Sparse Attention (DSA)
 
 ![deepseek-sparse-attention](resources/attention-dsa.png)
 
@@ -1096,13 +1008,8 @@ $$
 - V3.2: 引入 DSA，减少 long-context attention 的有效连接数。
 - V4: 在 DSA 前加入序列维度压缩，并用 CSA/HCA hybrid pattern 同时控制 KV Cache 和 attention FLOPs。
 
-<a id="linear-recurrent-route"></a>
-## Linear / Recurrent Attention
-
-这条路线不再显式保留所有历史 token 的 K/V，而是把历史信息写入固定或近似固定大小的递推 state。它和 Sparse Attention 都面向长上下文效率，但两者改变的是不同层面的东西：Sparse Attention 减少可见 KV 集合，Linear/Recurrent Attention 改变历史记忆表示。
-
 <a id="linear-attention-gdn"></a>
-### Linear Attention / GDN (GatedDeltaNet)
+### Gated DeltaNet (GDN)
 
 ![gated-deltanet-linear-attention](resources/attention-linear-gdn.png)
 
@@ -1218,10 +1125,57 @@ $$
 
 它的局限也来自同一个设计：固定大小 state 仍然可能发生 memory collision，不能无损替代 exact softmax attention；训练和推理也依赖专门的 linear/recurrent kernel。Qwen3-Next、Qwen3.5、Kimi Linear 这类模型采用的 3:1 linear/recurrent + softmax/MLA hybrid pattern，本质上就是在用 GDN 承担长期压缩记忆，用少量 softmax attention 层补足精确检索能力。
 
+<a id="llm-attention-choices"></a>
+## 典型 LLM 的 Attention 选型
+
+前面几节分别讨论了 Head/KV 表示压缩和长上下文 Attention 压缩两类模型侧路线。放回真实 LLM 架构里，这些机制通常不是单独出现，而是和 MoE、局部窗口、少量 full attention 层、推理系统 cache 管理一起组合。
+
+下表主要参考 Sebastian Raschka 的 [The Big LLM Architecture Comparison](https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison)（最后更新于 2026-04-02），并结合各模型官方发布页、模型卡和本文前面对 DeepSeek-V4 的整理。这里只关注 text LLM 的 attention 选择，不展开 MoE、Norm、Tokenizer、MTP 等其它结构差异；发布时间按首次公开发布或主要权重发布排序。
+
+<a id="llm-attention-table"></a>
+### 模型速览
+
+| 发布时间 | 模型 / 系列 | Attention 选型 | 对应本文路线 | 备注 |
+| --- | --- | --- | --- | --- |
+| 2024-11-26 | OLMo 2 | MHA | Scaled Dot-Product / Causal Attention | 一个相对传统、透明的 baseline；后来 OLMo 2 32B variant 使用 GQA。 |
+| 2024-12-26 / 2025-01-20 | DeepSeek-V3 / R1 | MLA | Head/KV 表示压缩 | V3 首发 MLA 架构；R1 基于 V3 延续 MLA，进一步把 DeepSeek-style MLA 推到主流视野。 |
+| 2025-03-12 | Gemma 3 | GQA + SWA/full hybrid，约 5:1 | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 5 个 sliding-window local layer 后接 1 个 global/full attention layer；SWA window 从 Gemma 2 的 4096 降到 1024。 |
+| 2025-03-17 | Mistral Small 3.1 | GQA，默认不启用 SWA | Head/KV 表示压缩 | 相比早期 Mistral，Small 3.1 默认 `sliding_window=null`，更偏 regular GQA。 |
+| 2025-04-05 | Llama 4 | GQA | Head/KV 表示压缩 | 延续 Llama 系列常见的 GQA 路线。 |
+| 2025-04-29 | Qwen3 dense / MoE | GQA | Head/KV 表示压缩 | Raschka 文中也把 Qwen3 作为 GQA baseline 来对比 gpt-oss、Olmo 3、MiniMax-M2 等模型。 |
+| 2025-07 | Kimi K2 | MLA | Head/KV 表示压缩 | 架构接近 DeepSeek-V3，但调整了 MoE 与 MLA 规模；后续 K2 Thinking 延续 K2 系列路线。 |
+| 2025-08-05 | gpt-oss | GQA + SWA every other layer + attention sinks | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 与 Qwen3 都使用 GQA，但 gpt-oss 每隔一层限制上下文窗口，并加入 attention sink/bias 设计。 |
+| 2025-09-11 | Qwen3-Next | GatedDeltaNet + Gated Attention，约 3:1 | 长上下文 Attention 压缩 + 标准 attention hybrid | 用 3 个 GatedDeltaNet block 搭配 1 个 gated attention block，降低长上下文 memory 成本。 |
+| 2025-10-27 | MiniMax-M2 | GQA + full softmax attention | Head/KV 表示压缩 + 标准 full attention | MiniMax-M1 曾使用 lightning attention；M2 为了 reasoning 和 multi-turn 质量回到常规 softmax attention，`sliding_window=null`，同时配置为 48 query heads / 8 KV heads 的 GQA。 |
+| 2025-10-30 | Kimi Linear | GatedDeltaNet + MLA，约 3:1 | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 与 Qwen3-Next 相似，但 full attention 层用 MLA，而不是普通 gated attention。 |
+| 2025-11-20 | Olmo 3 7B / 32B | 7B: MHA + SWA；32B: GQA + SWA/global | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 7B 延续 MHA，但加入 SWA 缩小 KV Cache；32B 改用 GQA。 |
+| 2025-12-01 | DeepSeek-V3.2 | MLA + Sparse Attention / DSA | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 在 V3 的 MLA 基础上加入稀疏 attention，面向长上下文效率。 |
+| 2025-12-02 | Mistral 3 Large | DeepSeek-V3-like MLA | Head/KV 表示压缩 | Raschka 文中认为它几乎采用 DeepSeek-V3/V3.1 架构，只调整 expert 尺寸和数量。 |
+| 2025-12 | Xiaomi MiMo-V2-Flash | SWA/full hybrid，约 5:1，window 128 | 长上下文 Attention 压缩 | 使用比 Gemma 3 更激进的小窗口 SWA，被文中称为当时最大规模的 SWA 模型之一。 |
+| 2025-12 / 2026-03 | Nemotron 3 Nano / Super | Mamba-Transformer hybrid + 少量 GQA layers | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 大量层用 Mamba-2/state-space 风格模块，只在少数层保留 GQA；Super 是后续更大版本。 |
+| 2026-01-27 | Arcee Trinity Large | SWA/global 约 3:1 + gated attention | 长上下文 Attention 压缩 + gated attention | 类似 Gemma/Olmo/Xiaomi 的 local/global 交替，但比例为 3:1，窗口较大。 |
+| 2026-02 | Qwen3.5 | GatedDeltaNet + Softmax Attention，约 3:1 | 长上下文 Attention 压缩 + 标准 attention hybrid | Qwen 官方站点描述为 75% GatedDeltaNet + 25% Softmax Attention，面向 256K 到 1M+ 长上下文。 |
+| 2026-02-11 / 2026-02-12 | GLM-5 | MLA + DeepSeek Sparse Attention | Head/KV 表示压缩 + 长上下文 Attention 压缩 | Raschka 文中指出 GLM-5 采用 DeepSeek 的 MLA 与 sparse attention，以降低长上下文推理成本。 |
+| 2026-04-02 | Gemma 4 | GQA + SWA/full hybrid，约 5:1 | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 结构基本延续 Gemma 3；global attention 层还引入 K/V 复用细节。 |
+| 2026-04-24 | DeepSeek-V4 | CSA + HCA hybrid attention | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 在本文前面单独展开：先做序列压缩，再做 hybrid sparse/full/local 组合。 |
+
+<a id="llm-attention-trends"></a>
+### 几个趋势
+
+从 2026-05 的视角看，这些模型体现出几个趋势：
+
+- **GQA 已经从“前沿创新”变成成熟 baseline**。Llama、Qwen3 dense/MoE、Gemma、Mistral Small、gpt-oss 等仍大量使用 GQA，因为它实现成熟、质量稳定、KV Cache 明显小于 MHA。但如果只看最新的前沿长上下文和 agent-oriented 架构，GQA 更像基础组件，而不是主要演进方向。
+- **MLA 正在成为前沿大规模 MoE / long-context LLM 的核心 KV 压缩方案**。DeepSeek-V3/R1、Kimi K2、Mistral 3 Large、GLM-5 都采用或接近 DeepSeek-style MLA。相比 GQA 只减少 KV heads，MLA 直接压缩历史 K/V 表示，在长上下文 decode 中更能缓解 KV Cache 容量和 HBM 读取压力。
+- **Sparse / Hybrid Attention 正在成为长上下文 agent 场景的重要路线**。DeepSeek-V3.2 的 DSA、DeepSeek-V4 的 CSA/HCA、Gemma/gpt-oss/Olmo/Xiaomi/Trinity 的 SWA/full hybrid，都说明前沿模型不再默认每层都做 full attention，而是把 full/global/local/sparse 连接组合起来，减少长上下文下实际读取和计算的 KV 数量。
+- **Linear / recurrent attention 从研究路线进入主流前沿模型栈**。Qwen3-Next、Qwen3.5 类模型、Kimi Linear、Nemotron 3、MiniMax-M1 都说明，GatedDeltaNet/Mamba-style state 能把随上下文线性增长的 KV Cache 压成固定或近似固定大小的 recurrent state。它们通常不会完全替代 softmax attention，而是以 3:1、local/global、或 state-space + attention 的 hybrid pattern 出现。
+- **Agent 场景正在推动 attention 从“质量优先”转向“质量 + 长上下文成本共同优化”**。多轮工具调用、代码仓库级上下文、长文档检索会把 KV Cache 容量、HBM 带宽和 prefill/decode 延迟同时放大。因此，MLA、Sparse Attention、linear/recurrent state 这些能降低长上下文 cache/访存成本的方案，正在比单纯的 GQA 更接近新一代架构主线。
+
+下面再看另一类问题：当模型侧 attention 语义确定后，推理和训练系统如何把同样的 attention 算得更快、缓存得更省、并在多请求或多设备场景下更容易调度。
+
 <a id="kernel-system-optimization"></a>
 ## Kernel / 系统优化
 
-下面这些技术经常和 attention 机制一起讨论，但它们并不直接改变模型的 attention 连接结构或 K/V 表示。它们更偏向 kernel、cache 管理、分布式执行或训练稳定性。
+下面这些技术经常和 attention 机制一起讨论，但它们并不直接改变模型的 attention 连接结构或 K/V 表示。它们更偏向 kernel、KV Cache 管理、prefix cache 复用、分布式执行或训练稳定性。
 
 <a id="flashattention"></a>
 ### FlashAttention：Exact Attention 的 IO 优化手段
@@ -1329,6 +1283,112 @@ FlashAttention 后续版本基本都没有改变“tiling + online softmax + 不
 FA1 到 FA4 的变化不是“attention 数学越来越不同”，而是 **同一个 exact softmax attention 在不同 GPU 代际上的系统化重排**：FA1 解决 HBM IO，FA2 解决并行度和 work partition，FA3 利用 Hopper 异步执行和 FP8，FA4 进一步针对 Blackwell 的非对称硬件瓶颈重做 pipeline。
 
 FlashAttention 与 MHA/MQA/GQA/MLA/SWA 的关系是：它可以作为这些 attention 语义的高性能 kernel 实现。比如 GQA 改变 K/V heads 的数量，FlashAttention 改变这些张量在 GPU 上如何被读取和计算。
+
+<a id="flexattention"></a>
+### FlexAttention
+
+FlexAttention 是 PyTorch 提供的可编程 attention kernel 接口，API 位于 `torch.nn.attention.flex_attention`。它不是新的 attention 数学机制，而是一个 **compiler-driven programming model**：用户用少量 Python 函数描述 attention score 如何修改、哪些位置需要参与计算，`torch.compile` 再把这些逻辑 lowering 成 fused attention kernel。
+
+它要解决的问题是：FlashAttention 这类 fused kernel 很快，但通常比较“单体化”。如果研究者想组合 causal mask、sliding window、ALiBi、relative bias、document mask、tanh soft-capping、sample packing、PagedAttention 等变体，经常需要等待已有 kernel 支持，或者自己写 Triton/CUDA。FlexAttention 的目标是把这类变体变成 Python 级别的可组合描述，同时尽量保留 FlashAttention-style kernel 的性能。
+
+#### 计算接口
+
+FlexAttention 的核心调用形式可以简化为：
+
+```python
+from torch.nn.attention.flex_attention import flex_attention
+
+out = flex_attention(
+    query,
+    key,
+    value,
+    score_mod=score_mod,
+    block_mask=block_mask,
+    enable_gqa=True,
+)
+```
+
+其中 `score_mod` 描述 **softmax 前的 score 如何被修改**。它接收当前 scalar score，以及 batch/head/query/key-value index：
+
+```python
+def score_mod(score, b, h, q_idx, kv_idx):
+    return score
+```
+
+例如 ALiBi / relative position bias / local boost / soft-capping 都可以写成 score-level 变换，而不需要显式 materialize 一个 $S\times S$ bias matrix：
+
+```python
+def alibi(score, b, h, q_idx, kv_idx):
+    distance = q_idx - kv_idx
+    return score + slopes[h] * distance
+```
+
+`mask_mod` 则描述 **哪些 query-key 位置需要参与计算**：
+
+```python
+def causal_window(b, h, q_idx, kv_idx):
+    causal = q_idx >= kv_idx
+    window = q_idx - kv_idx <= W
+    return causal & window
+```
+
+然后通过 `create_block_mask` 把 token-level mask 转成 block-level sparsity metadata：
+
+```python
+from torch.nn.attention.flex_attention import create_block_mask
+
+block_mask = create_block_mask(
+    causal_window,
+    B=None,
+    H=None,
+    Q_LEN=S,
+    KV_LEN=S,
+)
+
+out = flex_attention(q, k, v, block_mask=block_mask)
+```
+
+这里区分 `score_mod` 和 `mask_mod` 很关键：`score_mod` 更通用，但如果只是 mask，把无效位置写成 `-inf` 仍然可能让 kernel 走过这些位置；`block_mask` 能让 kernel 在 block 粒度上跳过无效区域，从而利用稀疏性。
+
+#### 设计动机
+
+FlexAttention 的价值不是“比 FlashAttention 更 exact”，而是让更多 attention 变体不用手写 kernel：
+
+- **可表达性**：用 `score_mod` 表达 bias、相对位置、soft-capping、attention sink 等 score-level 逻辑。
+- **稀疏性**：用 `mask_mod + create_block_mask` 表达 causal、sliding window、document mask、sample packing 等 block sparse pattern。
+- **可组合性**：多个 mask 可以组合，score modification 和 block mask 也可以同时使用。
+- **自动反向**：PyTorch 编译和 autograd 体系会生成对应 backward，而不是只支持 forward。
+
+从工程视角看，FlexAttention 相当于把“attention variant 的语义描述”和“底层 fused kernel 实现”分离。研究阶段可以用 Python 表达新 pattern；当形状和 pattern 稳定后，`torch.compile` 为该组合生成专门 kernel。
+
+#### 推理与后端
+
+PyTorch 后续还为 FlexAttention 加了推理侧路径。长上下文 decode 的形态通常是：
+
+$$
+q\_len \ll kv\_len
+$$
+
+例如每步只有 1 个新 query token，但要 attend 到很长的 KV Cache。PyTorch 的 FlexDecoding backend 会在这种短 query / 长 KV 的形态下，生成更适合 decode 的 fused kernel，而不是沿用更偏 prefill/training 的 square attention kernel。官方介绍中还提到推理路径支持 GQA，并能和 PagedAttention 这类 KV Cache 管理方式配合。
+
+到 2026 年，FlexAttention 还开始接入 FlashAttention-4 backend：用户仍然写 `score_mod` / `mask_mod`，但底层可以选择 FA4 风格后端，在 Hopper / Blackwell 上改善高性能场景的吞吐。这说明 FlexAttention 的定位不是替代 FlashAttention，而是把 FlashAttention-style kernel 变成更可编程的后端。
+
+#### 适用边界
+
+FlexAttention 适合：
+
+- 快速实验自定义 attention 变体。
+- 组合多个 score bias / mask pattern。
+- 希望保持 fused kernel，而不想手写 Triton/CUDA。
+- 训练和 prefill 中的 block sparse / custom mask attention。
+
+它的边界也很清楚：
+
+- 不是所有动态 top-k / gather 型稀疏 attention 都能自然表达成静态 `BlockMask`。
+- `torch.compile` 会带来编译开销；shape 或 pattern 大幅变化时可能触发重新编译。
+- 通用可编程接口通常很难永远追平为单一 pattern 手写到极致的 kernel；FA4 backend 正是在缩小这个差距。
+
+所以，FlexAttention 更准确地说是 **attention kernel programming interface**：它把 FlashAttention 的 IO-aware 执行思想扩展到“可组合 attention 变体”的场景。
 
 <a id="pagedattention"></a>
 ### PagedAttention
@@ -1450,16 +1510,6 @@ Ring Attention 的收益和代价都很明确：
 
 因此，Ring Attention 更准确地说是 **sequence parallel attention runtime**，而不是新的 Attention 结构。
 
-<a id="related-tech"></a>
-### QK-Norm / RoPE 等易混概念
-
-还有一些技术经常和 Attention 机制一起出现，但它们并不一定是新的 Attention 数学结构。
-
-- **QK-Norm**：在 Q/K 上做归一化，主要改善训练稳定性和 attention logit 尺度控制。它改变 score 的数值分布，但不是一种新的稀疏或 KV Cache 压缩机制。
-- **RoPE / ALiBi / YaRN**：这些是位置编码或位置外推方法，决定模型如何感知 token 位置。它们会影响 Attention score，但不改变 full、local、sparse、MQA/GQA 这些 Attention 连接结构。
-- **Longformer / BigBird 类 pattern**：它们是固定稀疏 Attention 的经典代表，包含 local、global、random 等连接模式。现代 LLM 更常见的是把这些思想融入 SWA、block sparse 或动态稀疏结构中。
-
-所以，如果按“是否改变 Attention 的连接或 K/V 表示”来划分，MHA/MQA/GQA/MLA 属于 KV 表示压缩路线，SWA/Sparse/DSA/DeepSeek-V4 Hybrid Attention 属于 softmax attention 的稀疏化路线；GDN 属于 linear/recurrent attention 路线；PagedAttention、RadixAttention、Ring Attention、FlashAttention 更偏系统和 kernel；RoPE/QK-Norm 更偏位置和稳定性。
 
 <a id="references"></a>
 ## References
@@ -1491,6 +1541,11 @@ Ring Attention 的收益和代价都很明确：
 - [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.08691)
 - [FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision](https://arxiv.org/abs/2407.08608)
 - [FlashAttention-4: Algorithm and Kernel Pipelining Co-Design for Asymmetric Hardware Scaling](https://arxiv.org/abs/2603.05451)
+- [torch.nn.attention.flex_attention documentation](https://docs.pytorch.org/docs/2.11/nn.attention.flex_attention.html)
+- [FlexAttention: The Flexibility of PyTorch with the Performance of FlashAttention](https://pytorch.org/blog/flexattention/)
+- [FlexAttention: A Programming Model for Generating Optimized Attention Kernels](https://arxiv.org/abs/2412.05496)
+- [FlexAttention Part II: FlexAttention for Inference](https://pytorch.org/blog/flexattention-for-inference/)
+- [FlexAttention + FlashAttention-4: Fast and Flexible](https://pytorch.org/blog/flexattention-flashattention-4-fast-and-flexible/)
 - [Efficient Memory Management for Large Language Model Serving with PagedAttention](https://arxiv.org/abs/2309.06180)
 - [Efficiently Programming Large Language Models using SGLang](https://arxiv.org/abs/2312.07104)
 - [SGLang RadixAttention Docs](https://sgl-project-sglang-93.mintlify.app/concepts/radix-attention)
@@ -1502,5 +1557,3 @@ Ring Attention 的收益和代价都很明确：
 - [DeepSeek V4 in vLLM: Efficient Long-context Attention](https://vllm.ai/blog/deepseek-v4)
 - [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464)
 - [DeltaNet Explained (Part I): The Model](https://sustcsonglin.github.io/blog/2024/deltanet-1/)
-- [DeltaNet Explained (Part II): The Algorithm](https://sustcsonglin.github.io/blog/2024/deltanet-2/)
-- [DeltaNet Explained (Part III): The Neural Architecture](https://sustcsonglin.github.io/blog/2024/deltanet-3/)
