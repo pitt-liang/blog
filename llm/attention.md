@@ -74,7 +74,7 @@ $$
 
 $$
 \text{Attn}(Q,K,V)
-=
+{}={}
 \text{softmax}\left(\frac{QK^T}{\sqrt{d}} + M\right)V
 $$
 
@@ -93,13 +93,13 @@ MHA 是 Transformer 原始论文中的标准形式。它把 hidden state 切分�
 
 $$
 \text{head}_i
-=
+{}={}
 \text{Attn}(XW_Q^{(i)}, XW_K^{(i)}, XW_V^{(i)})
 $$
 
 $$
 \text{MHA}(X)
-=
+{}={}
 \text{Concat}(\text{head}_1,\ldots,\text{head}_{H_q})W_O
 $$
 
@@ -171,7 +171,7 @@ $$
 
 $$
 o_t
-=
+{}={}
 \text{softmax}\left(
 \frac{q_t K_{1:t}^T}{\sqrt{d}}
 \right)V_{1:t}
@@ -277,7 +277,7 @@ $$
 
 $$
 O_i
-=
+{}={}
 \text{Attn}(Q_i, K_{\text{shared}}, V_{\text{shared}})
 $$
 
@@ -305,7 +305,7 @@ $$
 
 $$
 \frac{\text{KVCache}_{MQA}}{\text{KVCache}_{MHA}}
-=
+{}={}
 \frac{1}{H_q}
 $$
 
@@ -337,7 +337,7 @@ $$
 
 $$
 O_i
-=
+{}={}
 \text{Attn}(Q_i,K_{g(i)},V_{g(i)})
 $$
 
@@ -443,7 +443,7 @@ $$
 
 $$
 q_{t,h}^{nope}(c_j^{KV}W_{UK,h})^T
-=
+{}={}
 q_{t,h}^{nope}W_{UK,h}^T(c_j^{KV})^T
 $$
 
@@ -457,7 +457,7 @@ $$
 
 $$
 s_{t,j,h}^{nope}
-=
+{}={}
 \tilde q_{t,h}^{nope}\cdot c_j^{KV}
 $$
 
@@ -475,7 +475,7 @@ $$
 o_{t,h}=\sum_j a_{t,j,h}v_{j,h}
 \quad\Rightarrow\quad
 o_{t,h}
-=
+{}={}
 \left(\sum_j a_{t,j,h}c_j^{KV}\right)W_{UV,h}
 $$
 
@@ -502,7 +502,7 @@ $$
 
 $$
 t \cdot 512 \cdot 128 + s \cdot t \cdot 128
-=
+{}={}
 65536t + 128st
 $$
 
@@ -516,7 +516,7 @@ $$
 
 $$
 s \cdot 512 \cdot 128 + s \cdot t \cdot 512
-=
+{}={}
 65536s + 512st
 $$
 
@@ -557,7 +557,7 @@ Attention mask 从完整的下三角矩阵变成一条宽度为 $W$ 的 band：
 
 $$
 O_i
-=
+{}={}
 \text{Attn}(q_i,K_{i-W:i},V_{i-W:i})
 $$
 
@@ -626,7 +626,7 @@ $$
 
 $$
 O_i
-=
+{}={}
 \text{softmax}\left(\frac{q_i K_{\mathcal{A}(i)}^T}{\sqrt{d}}\right)V_{\mathcal{A}(i)}
 $$
 
@@ -682,7 +682,7 @@ NSA 为每个 query 构造一个更小的 representation KV 集合：
 
 $$
 \widetilde{\mathcal{K}}_i
-=
+{}={}
 \mathcal{K}^{cmp}_i
 \cup
 \mathcal{K}^{sel}_i
@@ -694,7 +694,7 @@ $$
 
 $$
 O_i
-=
+{}={}
 \sum_{r\in\{cmp,sel,win\}}
  g_i^r\cdot
 \text{Attn}(q_i,K_i^r,V_i^r)
@@ -708,7 +708,7 @@ NSA 先把连续历史 token 划分成 block，用一个带 intra-block position
 
 $$
 (K_{b}^{cmp},V_{b}^{cmp})
-=
+{}={}
 \text{Compress}(K_{b:b+l},V_{b:b+l})
 $$
 
@@ -722,7 +722,7 @@ NSA 使用 query 对 compressed keys 的 attention score 来推导 selection blo
 
 $$
 \mathcal{B}_i^{sel}
-=
+{}={}
 \text{TopBlock}(\text{Score}(q_i,K^{cmp}))
 $$
 
@@ -730,7 +730,7 @@ $$
 
 $$
 (K_i^{sel},V_i^{sel})
-=
+{}={}
 \text{Concat}_{b\in \mathcal{B}_i^{sel}}(K_b,V_b)
 $$
 
@@ -772,7 +772,7 @@ NSA 每个 query 实际访问的 KV 数量由三部分组成：
 
 $$
 N_{NSA}
-=
+{}={}
 N_{cmp}+N_{sel}+W
 $$
 
@@ -817,7 +817,7 @@ DSA 原型由两部分组成：
 
 $$
 I_{t,s}
-=
+{}={}
 \sum_{j=1}^{H^I}
 w_{t,j}^{I}\cdot
 \text{ReLU}\left(
@@ -825,13 +825,13 @@ w_{t,j}^{I}\cdot
 \right)
 $$
 
-其中 $H^I$ 是 indexer heads 数量，$\mathbf{q}_{t,j}^{I}$ 和 $w_{t,j}^{I}$ 来自当前 query token，$\mathbf{k}_{s}^{I}$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
+其中 $H^I$ 是 indexer heads 数量，$`\mathbf{q}_{t,j}^{I}`$ 和 $`w_{t,j}^{I}`$ 来自当前 query token，$\mathbf{k}_{s}^{I}$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
 
 有了 $I_{t,s}$ 之后，DSA 只取 top-$k$ 对应的 KV entries：
 
 $$
 \mathcal{S}_t
-=
+{}={}
 \left\{
 s
 \mid
@@ -843,7 +843,7 @@ $$
 
 $$
 \mathbf{u}_t
-=
+{}={}
 \text{Attn}
 \left(
 \mathbf{h}_t,
@@ -947,7 +947,7 @@ $$
 
 $$
 C_i^{comp}
-=
+{}={}
 \sum_{j \in \mathcal{G}_i}
 \text{softmax}(Z_j + B) \odot C_j
 $$
@@ -958,7 +958,7 @@ $$
 
 $$
 \mathcal{A}_{CSA}(t)
-=
+{}={}
 \text{TopK}\left(
 I_{t,s}
 \right)
@@ -968,7 +968,7 @@ $$
 
 $$
 I_{t,s}
-=
+{}={}
 \sum_h w_{t,h}^I \cdot
 \text{ReLU}\left(q_{t,h}^I \cdot K_s^{IComp}\right)
 $$
@@ -977,7 +977,7 @@ $$
 
 $$
 O_t^{CSA}
-=
+{}={}
 \text{Attn}\left(
 q_t,
 C_{\mathcal{A}_{CSA}(t)}^{comp},
@@ -1001,7 +1001,7 @@ $$
 
 $$
 C_i^{comp}
-=
+{}={}
 \sum_{j=m'i}^{m'(i+1)-1}
 \text{softmax}(Z_j + B) \odot C_j
 $$
@@ -1010,7 +1010,7 @@ $$
 
 $$
 O_t^{HCA}
-=
+{}={}
 \text{Attn}\left(q_t,C^{comp},C^{comp}\right)
 $$
 
@@ -1024,7 +1024,7 @@ CSA 和 HCA 都会把多个 token 压成一个 KV entry。压缩带来的问题�
 
 $$
 O_t^{local}
-=
+{}={}
 \text{Attn}(q_t,K_{t-n_{win}:t},V_{t-n_{win}:t})
 $$
 
@@ -1083,7 +1083,7 @@ DeepSeek-V4 的 attention 是典型的模型-系统共同设计：
 
 $$
 \text{DeepSeek-V4 Attention}
-=
+{}={}
 \text{interleaved CSA/HCA}
 + \text{local SWA}
 + \text{shared-KV MQA}
@@ -1130,9 +1130,9 @@ $$
 
 $$
 o_t
-=
+{}={}
 \sum_{i=1}^{t} v_i(k_i^Tq_t)
-=
+{}={}
 \left(\sum_{i=1}^{t} v_i k_i^T\right)q_t
 $$
 
@@ -1146,7 +1146,7 @@ $$
 
 $$
 S_t
-=
+{}={}
 S_{t-1}(I-\beta_t k_tk_t^T)
 +
 \beta_t v_tk_t^T
@@ -1158,7 +1158,7 @@ GatedDeltaNet 在 delta rule 外再加一个 data-dependent decay gate：
 
 $$
 S_t
-=
+{}={}
 S_{t-1}
 \left(
 \alpha_t(I-\beta_t k_tk_t^T)
