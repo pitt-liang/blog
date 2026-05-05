@@ -1,4 +1,4 @@
-# Attention in Transformers
+# Attention in LLM
 
 <a id="toc"></a>
 ## 目录
@@ -55,10 +55,6 @@
 <a id="scaled-dot-product-attention"></a>
 ## Scaled Dot-Product / Causal Attention
 
-![scaled-dot-product-attention](resources/attention-causal-score-output.png)
-
-*图片来源：[Attention Is All You Need, Figure 2](https://arxiv.org/abs/1706.03762)*
-
 <a id="scaled-dot-product-formula"></a>
 ### Scaled Dot-Product Attention
 
@@ -73,19 +69,19 @@ $$
 $$
 \text{Attn}(Q,K,V)
 {}={}
-\text{softmax}\left(\frac{QK^T}{\sqrt{d}} + M\right)V
+\text{softmax}\bigl(\frac{QK^T}{\sqrt{d}} + M\bigr)V
 $$
 
 其中 $M$ 是 mask。在 Decoder-only LLM 中，$M$ 通常是 causal mask，保证第 $i$ 个 token 只能看到 $\le i$ 的 token，不能看到未来 token。
 
 如果 $q$ 和 $k$ 的每个维度近似独立，方差为 1，那么点积 $q \cdot k$ 的方差会随 $d$ 增大。直接把 $QK^T$ 输入 softmax，容易让 softmax 饱和，梯度变小。除以 $\sqrt{d}$ 的作用是稳定 score 的尺度，让训练更稳定。
 
-<a id="mha"></a>
-### Multi-Head Attention (MHA)
-
-![multi-head-attention](resources/attention-mha.png)
+![scaled-dot-product-attention](resources/attention-causal-score-output.png)
 
 *图片来源：[Attention Is All You Need, Figure 2](https://arxiv.org/abs/1706.03762)*
+
+<a id="mha"></a>
+### Multi-Head Attention (MHA)
 
 MHA 是 Transformer 原始论文中的标准形式。它把 hidden state 切分为多个 head，每个 head 独立做 Attention，最后 concat 后经过输出投影：
 
@@ -108,6 +104,10 @@ H_{kv}=H_q
 $$
 
 也就是每个 query head 都有自己独立的 K/V head。
+
+![multi-head-attention](resources/attention-mha.png)
+
+*图片来源：[Attention Is All You Need, Figure 2](https://arxiv.org/abs/1706.03762)*
 
 #### 设计动机
 
@@ -170,9 +170,7 @@ $$
 $$
 o_t
 {}={}
-\text{softmax}\left(
-\frac{q_t K_{1:t}^T}{\sqrt{d}}
-\right)V_{1:t}
+\text{softmax}\bigl(q_t K_{1:t}^T / \sqrt{d}\bigr)V_{1:t}
 $$
 
 这也解释了为什么通常只有 KV Cache，没有 Q Cache：decode 第 $t$ 步只需要当前 token 的 $q_t$；历史 query 不会参与当前 token 的输出计算，也不需要缓存。
@@ -213,11 +211,11 @@ FlashAttention、FlexAttention、PagedAttention、RadixAttention、Ring Attentio
 <a id="mqa"></a>
 ### Multi-Query Attention (MQA)
 
+MQA 的核心变化是：保留多个 Query heads，但所有 Query heads 共享同一组 K/V。
+
 ![multi-query-attention](resources/attention-mqa.png)
 
 *图片来源：[GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints, Figure 2](https://arxiv.org/abs/2305.13245)*
-
-MQA 的核心变化是：保留多个 Query heads，但所有 Query heads 共享同一组 K/V。
 
 $$
 Q \in \mathbb{R}^{B \times S \times H_q \times d}
@@ -277,16 +275,16 @@ $$
 <a id="gqa"></a>
 ### Grouped-Query Attention (GQA)
 
-![grouped-query-attention](resources/attention-gqa.png)
-
-*图片来源：[GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints, Figure 2](https://arxiv.org/abs/2305.13245)*
-
 GQA 是 MHA 和 MQA 之间的折中。它把 $H_q$ 个 query heads 分成 $H_{kv}$ 组，每组 query heads 共享一组 K/V。
 
 假设 $H_q=32, H_{kv}=8$，那么每 4 个 query heads 共享一组 K/V：
 
+![grouped-query-attention](resources/attention-gqa.png)
+
+*图片来源：[GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints, Figure 2](https://arxiv.org/abs/2305.13245)*
+
 $$
-g(i) = \left\lfloor \frac{i}{H_q/H_{kv}} \right\rfloor
+g(i) = \lfloor i / (H_q/H_{kv}) \rfloor
 $$
 
 $$
@@ -327,13 +325,13 @@ $$
 <a id="mla"></a>
 ### Multi-Head Latent Attention (MLA)
 
-![multi-head-latent-attention](resources/attention-mla.png)
-
-*图片来源：[DeepSeek-V2, Figure 3](https://arxiv.org/html/2405.04434v5/x3.png)*
-
 MLA 是 DeepSeek-V2 引入的 attention 结构。它不是继续减少 KV heads，而是改变 K/V 的缓存表示：**保留多 query heads，但把历史 K/V cache 从 per-head K/V 改成 latent KV + RoPE key**。
 
 这个设计天然支持两种模式：训练 / prefill 时把 latent 展开成 per-head K/V，走 MHA-like dense attention；decode 时缓存共享 latent KV，通过矩阵吸收避免物化完整 MHA-style KV Cache。
+
+![multi-head-latent-attention](resources/attention-mla.png)
+
+*图片来源：[DeepSeek-V2, Figure 3](https://arxiv.org/html/2405.04434v5/x3.png)*
 
 #### 计算机制
 
@@ -428,7 +426,7 @@ o_{t,h}=\sum_j a_{t,j,h}v_{j,h}
 \quad\Rightarrow\quad
 o_{t,h}
 {}={}
-\left(\sum_j a_{t,j,h}c_j^{KV}\right)W_{UV,h}
+\bigl(\sum_j a_{t,j,h}c_j^{KV}\bigr)W_{UV,h}
 $$
 
 因此，矩阵吸收的速度收益主要来自减少 HBM 读写：历史侧只保存和读取 latent KV，不展开、不写回 per-head K/V。
@@ -494,10 +492,6 @@ $$
 <a id="swa"></a>
 ### Sliding Window Attention (SWA)
 
-![sliding-window-attention](resources/attention-swa.png)
-
-*图片来源：[Mistral 7B, Figure 1](https://arxiv.org/abs/2310.06825)*
-
 标准 full attention 中，第 $i$ 个 token 可以 attend 到所有历史 token：
 
 $$
@@ -517,6 +511,10 @@ O_i
 {}={}
 \text{Attn}(q_i,K_{i-W:i},V_{i-W:i})
 $$
+
+![sliding-window-attention](resources/attention-swa.png)
+
+*图片来源：[Mistral 7B, Figure 1](https://arxiv.org/abs/2310.06825)*
 
 #### 设计动机
 
@@ -568,10 +566,6 @@ Mistral 7B 是 SWA + GQA 的代表模型之一。它用 SWA 降低长序列推�
 <a id="nsa"></a>
 ### Native Sparse Attention (NSA)
 
-![native-sparse-attention](resources/attention-nsa.png)
-
-*图片来源：[Native Sparse Attention, Figure 2](https://arxiv.org/abs/2502.11089)*
-
 NSA 是 DeepSeek 在 2025 年提出的 **Natively trainable Sparse Attention**。它不是在 dense model 上做后处理式 token pruning，而是把 sparse pattern 作为模型结构的一部分，从预训练开始就参与 forward/backward，并配套硬件友好的 blockwise kernel。
 
 它的核心思路是：对每个 query，不再只从完整历史 K/V 中做 full attention，而是构造三类 representation K/V：
@@ -581,6 +575,10 @@ NSA 是 DeepSeek 在 2025 年提出的 **Natively trainable Sparse Attention**�
 - **Sliding window**：最近邻局部窗口，负责局部上下文。
 
 最终输出由三条 attention branch 通过 learned gate 聚合。也就是说，NSA 不是单一路径的 top-k sparse attention，而是 `compression + selection + sliding window` 的三分支稀疏结构。
+
+![native-sparse-attention](resources/attention-nsa.png)
+
+*图片来源：[Native Sparse Attention, Figure 2](https://arxiv.org/abs/2502.11089)*
 
 #### 计算机制
 
@@ -710,13 +708,13 @@ decode 阶段更偏 memory-bound。Full attention 每步需要读取全部历史
 <a id="dsa"></a>
 ### DeepSeek Sparse Attention (DSA)
 
-![deepseek-sparse-attention](resources/attention-dsa.png)
-
-*图片来源：[DeepSeek-V3.2, Figure 2](https://arxiv.org/abs/2512.02556)*
-
 DSA 是 DeepSeek-V3.2 引入的 sparse attention 机制。它和 NSA 一脉相承，但更具体地落在 DeepSeek-V3.2 的 MLA 架构上：用一个轻量 **lightning indexer** 为当前 query 选择少量历史 KV entries，然后只对这些 selected K/V 做 attention。
 
 DeepSeek-V3.2 是从 DeepSeek-V3.1-Terminus 继续训练得到的。论文中明确说，相比 V3.1-Terminus，V3.2 的唯一架构修改就是通过 continued training 引入 DSA。
+
+![deepseek-sparse-attention](resources/attention-dsa.png)
+
+*图片来源：[DeepSeek-V3.2, Figure 2](https://arxiv.org/abs/2512.02556)*
 
 #### 计算机制
 
@@ -732,23 +730,21 @@ I_{t,s}
 {}={}
 \sum_{j=1}^{H^I}
 w_{t,j}^{I}\cdot
-\text{ReLU}\left(
-\mathbf{q}_{t,j}^{I}\cdot \mathbf{k}_{s}^{I}
-\right)
+\text{ReLU}(\mathbf{q}_{t,j}^{I}\cdot \mathbf{k}_{s}^{I})
 $$
 
-其中 $H^I$ 是 indexer heads 数量，$`\mathbf{q}_{t,j}^{I}`$ 和 $`w_{t,j}^{I}`$ 来自当前 query token，$\mathbf{k}_{s}^{I}$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
+其中 $H^I$ 是 indexer heads 数量，$\mathbf{q}_{t,j}^{I}$ 和 $w_{t,j}^{I}$ 来自当前 query token，$\mathbf{k}_{s}^{I}$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
 
 有了 $I_{t,s}$ 之后，DSA 只取 top-$k$ 对应的 KV entries：
 
 $$
 \mathcal{S}_t
 {}={}
-\left\{
+\{
 s
 \mid
 I_{t,s}\in \text{Top-k}(I_{t,:})
-\right\}
+\}
 $$
 
 最终主 attention 仍然是 softmax attention，只是 K/V 集合从完整历史变成 selected set。由于 DSA 在 DeepSeek-V3.2 中基于 MLA 实例化，这里的 $\mathbf{c}_s$ 可以理解为 MLA 的 latent KV entry：
@@ -757,14 +753,14 @@ $$
 \mathbf{u}_t
 {}={}
 \text{Attn}
-\left(
+(
 \mathbf{h}_t,
-\left\{
+\{
 \mathbf{c}_s
 \mid
 s\in\mathcal{S}_t
-\right\}
-\right)
+\}
+)
 $$
 
 在 DeepSeek-V3.2 中，DSA 是 **instantiated under MLA**。更具体地说，它基于 MLA 的 **MQA mode** 实现：每个 latent vector 作为 MLA 的 key-value entry，被当前 query token 的所有 query heads 共享。这样做是出于 kernel 效率考虑，因为每个 K/V entry 必须被多个 query 共享，避免不同 heads 选择不同 entry 后导致访存集合膨胀。
@@ -811,11 +807,6 @@ DSA 仍然有 indexer 开销。论文指出 indexer 复杂度仍随上下文增�
 <a id="deepseek-v4-hybrid"></a>
 ### DeepSeek-V4 Hybrid Attention (CSA + HCA)
 
-![deepseek-v4-csa](resources/attention-dpskv4-csa.png)
-![deepseek-v4-hca](resources/attention-dpskv4-hca.png)
-
-*图片来源：[DeepSeek-V4 Technical Report, Figure 3 / Figure 4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)*
-
 DeepSeek-V4 在 V3.2 的 DSA 基础上进一步引入 **Hybrid Attention**，核心由两类 attention layer 交错组成：
 
 - **CSA (Compressed Sparse Attention)**：先压缩 KV Cache，再在压缩后的 KV 上做 DSA。
@@ -830,6 +821,10 @@ CSA 可以理解成：
 $$
 \text{CSA} = \text{Compression} + \text{DSA over compressed KV} + \text{local SWA branch}
 $$
+
+![deepseek-v4-csa](resources/attention-dpskv4-csa.png)
+
+*图片来源：[DeepSeek-V4 Technical Report, Figure 3](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)*
 
 设原始 hidden states 为：
 
@@ -871,9 +866,9 @@ $$
 $$
 \mathcal{A}_{CSA}(t)
 {}={}
-\text{TopK}\left(
+\text{TopK}(
 I_{t,s}
-\right)
+)
 $$
 
 其中 index score 可以抽象成多头 query 与 compressed indexer key 的打分：
@@ -882,7 +877,7 @@ $$
 I_{t,s}
 {}={}
 \sum_h w_{t,h}^I \cdot
-\text{ReLU}\left(q_{t,h}^I \cdot K_s^{IComp}\right)
+\text{ReLU}(q_{t,h}^I \cdot K_s^{IComp})
 $$
 
 最终 core attention 不是 attend 到原始 $S$ 个 token，而是 attend 到 top-k 个 compressed KV：
@@ -890,11 +885,11 @@ $$
 $$
 O_t^{CSA}
 {}={}
-\text{Attn}\left(
+\text{Attn}(
 q_t,
 C_{\mathcal{A}_{CSA}(t)}^{comp},
 C_{\mathcal{A}_{CSA}(t)}^{comp}
-\right)
+)
 $$
 
 注意这里的 compressed KV 同时作为 key 和 value，因此 core attention 采用 shared key-value MQA 风格。
@@ -906,6 +901,10 @@ HCA 的目标是提供更便宜的全局信号。它也做 KV compression，但�
 $$
 m'=128
 $$
+
+![deepseek-v4-hca](resources/attention-dpskv4-hca.png)
+
+*图片来源：[DeepSeek-V4 Technical Report, Figure 4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)*
 
 对应实现里常称为 `c128a`：把远距离上下文压到约 $1/128$ 后，对 compressed KV 做 dense attention。
 
@@ -923,7 +922,7 @@ $$
 $$
 O_t^{HCA}
 {}={}
-\text{Attn}\left(q_t,C^{comp},C^{comp}\right)
+\text{Attn}(q_t,C^{comp},C^{comp})
 $$
 
 因为序列长度已经从 $S$ 压到约 $S/128$，dense attention 的成本可以接受。HCA 的作用不是精确选择少量重要 block，而是用很低成本提供全局摘要信号。
@@ -1011,10 +1010,6 @@ $$
 <a id="linear-attention-gdn"></a>
 ### Gated DeltaNet (GDN)
 
-![gated-deltanet-linear-attention](resources/attention-linear-gdn.png)
-
-*图片来源：[Gated Delta Networks, Figure 1](https://arxiv.org/abs/2412.06464)*
-
 GatedDeltaNet 不是 sparse attention，也不是 MHA/GQA/MLA 这类 head layout 变体，而是 linear attention / recurrent sequence model 方向的替代结构。
 
 标准 softmax attention 的 decode 记忆是随序列增长的 token-level KV Cache：
@@ -1031,6 +1026,10 @@ $$
 
 每一步只保留和更新这个 state，而不是为每个历史 token 保存 K/V。因此它更接近“可训练的快速权重 / associative memory”，而不是从历史 token 列表中显式检索。
 
+![gated-deltanet-linear-attention](resources/attention-linear-gdn.png)
+
+*图片来源：[Gated Delta Networks, Figure 1](https://arxiv.org/abs/2412.06464)*
+
 #### 计算机制
 
 最基础的 linear attention 可以利用结合律把历史 KV 写成一个 state：
@@ -1040,7 +1039,7 @@ o_t
 {}={}
 \sum_{i=1}^{t} v_i(k_i^Tq_t)
 {}={}
-\left(\sum_{i=1}^{t} v_i k_i^T\right)q_t
+\bigl(\sum_{i=1}^{t} v_i k_i^T\bigr)q_t
 $$
 
 定义：
@@ -1067,9 +1066,9 @@ $$
 S_t
 {}={}
 S_{t-1}
-\left(
+(
 \alpha_t(I-\beta_t k_tk_t^T)
-\right)
+)
 +
 \beta_t v_tk_t^T
 $$
@@ -1108,9 +1107,9 @@ $$
 S_t
 \leftarrow
 S_{t-1}
-\left(
+(
 \alpha_t(I-\beta_t k_tk_t^T)
-\right)
+)
 +
 \beta_t v_tk_t^T
 $$
@@ -1180,6 +1179,14 @@ $$
 <a id="flashattention"></a>
 ### FlashAttention：Exact Attention 的 IO 优化手段
 
+FlashAttention 经常和 Attention 机制放在一起讨论，但它本质上不是新的 Attention 机制，也不是新的模型结构。它不改变下面这个数学结果：
+
+$$
+\text{softmax}\bigl(\frac{QK^T}{\sqrt{d}} + M\bigr)V
+$$
+
+它优化的是 exact attention 的 GPU 执行方式。核心判断是：长序列 attention 不只受 FLOPs 限制，更容易受 HBM 读写限制；因此 FlashAttention 把 $Q,K,V$ 分块放入 SRAM/register，用 online softmax 流式计算，避免 materialize $S\times S$ score/probability 矩阵。它保持 exact attention，同时显著减少 HBM read/write。
+
 ![flashattention-kernel](resources/attention-flashattention-io.png)
 
 *图片来源：[FlashAttention, Figure 1](https://arxiv.org/abs/2205.14135)*
@@ -1187,14 +1194,6 @@ $$
 ![flashattention-huggingface](resources/attention-flashattention-hf.png)
 
 *图片来源：[Hugging Face documentation images: flash-attn.png](https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/tgi/flash-attn.png)*
-
-FlashAttention 经常和 Attention 机制放在一起讨论，但它本质上不是新的 Attention 机制，也不是新的模型结构。它不改变下面这个数学结果：
-
-$$
-\text{softmax}\left(\frac{QK^T}{\sqrt{d}} + M\right)V
-$$
-
-它优化的是 exact attention 的 GPU 执行方式。核心判断是：长序列 attention 不只受 FLOPs 限制，更容易受 HBM 读写限制；因此 FlashAttention 把 $Q,K,V$ 分块放入 SRAM/register，用 online softmax 流式计算，避免 materialize $S\times S$ score/probability 矩阵。它保持 exact attention，同时显著减少 HBM read/write。
 
 #### 标准实现的问题
 
