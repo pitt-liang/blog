@@ -37,20 +37,20 @@
 
 这也是 LLM 训练和推理优化里绕不开 Attention 的原因：
 
-- Prefill 阶段需要处理完整 prompt，基于Softmax Dot Product Attention 的 score 矩阵大小是 $S \times S$，计算复杂度随序列长度二次增长。
-- Decode 阶段每次只生成一个 token，计算量看起来是 $O(S)$，但必须从 HBM 读取历史 KV Cache，瓶颈经常从算力转为显存容量和显存带宽。
+- Prefill 阶段需要处理完整 prompt，基于Softmax Dot Product Attention 的 score 矩阵大小是 $`S \times S`$，计算复杂度随序列长度二次增长。
+- Decode 阶段每次只生成一个 token，计算量看起来是 $`O(S)`$，但必须从 HBM 读取历史 KV Cache，瓶颈经常从算力转为显存容量和显存带宽。
 - 长上下文会同时放大两类问题：prefill 的 quadratic compute 和 decode 的 KV Cache 读写。
 
 理解这些机制，可以从一个问题出发：标准 causal attention 需要让当前 token 读取全部历史信息，而 KV Cache 虽然避免了重复计算，却让长上下文推理越来越受显存和带宽限制。后续各种 attention 变体的差异，主要就在于它们选择压缩什么：压缩 KV 表示、稀疏化历史连接、把历史写成 recurrent state，或者优化 exact attention 的 kernel IO。
 
 下面统一使用这些符号：
 
-- $B$: batch size
-- $S$: sequence length
-- $D$: hidden size
-- $H_q$: query heads 数量
-- $H_{kv}$: key/value heads 数量
-- $d$: head dim，通常 $D = H_q d$
+- $`B`$: batch size
+- $`S`$: sequence length
+- $`D`$: hidden size
+- $`H_q`$: query heads 数量
+- $`H_{kv}`$: key/value heads 数量
+- $`d`$: head dim，通常 $`D = H_q d`$
 
 <a id="scaled-dot-product-attention"></a>
 ## Scaled Dot-Product / Causal Attention
@@ -72,9 +72,9 @@ $$
 \text{softmax}\bigl(\frac{QK^T}{\sqrt{d}} + M\bigr)V
 $$
 
-其中 $M$ 是 mask。在 Decoder-only LLM 中，$M$ 通常是 causal mask，保证第 $i$ 个 token 只能看到 $\le i$ 的 token，不能看到未来 token。
+其中 $`M`$ 是 mask。在 Decoder-only LLM 中，$`M`$ 通常是 causal mask，保证第 $`i`$ 个 token 只能看到 $`\le i`$ 的 token，不能看到未来 token。
 
-如果 $q$ 和 $k$ 的每个维度近似独立，方差为 1，那么点积 $q \cdot k$ 的方差会随 $d$ 增大。直接把 $QK^T$ 输入 softmax，容易让 softmax 饱和，梯度变小。除以 $\sqrt{d}$ 的作用是稳定 score 的尺度，让训练更稳定。
+如果 $`q`$ 和 $`k`$ 的每个维度近似独立，方差为 1，那么点积 $`q \cdot k`$ 的方差会随 $`d`$ 增大。直接把 $`QK^T`$ 输入 softmax，容易让 softmax 饱和，梯度变小。除以 $`\sqrt{d}`$ 的作用是稳定 score 的尺度，让训练更稳定。
 
 ![scaled-dot-product-attention](resources/attention-causal-score-output.png)
 
@@ -113,13 +113,13 @@ $$
 
 单头 Attention 只能在一个表示子空间里计算 token 间关系。MHA 则允许不同 head 学到不同的关系模式，例如局部依赖、长距离依赖、语法关系、实体指代等。
 
-从矩阵视角看，MHA 不是简单地把一个大 head 拆小，而是为每个 head 引入独立的 $W_Q,W_K,W_V$ 投影，让不同 head 在不同表示空间里构造不同的相似度矩阵。
+从矩阵视角看，MHA 不是简单地把一个大 head 拆小，而是为每个 head 引入独立的 $`W_Q,W_K,W_V`$ 投影，让不同 head 在不同表示空间里构造不同的相似度矩阵。
 
 #### 计算缓存分析
 
 MHA 的优点是表达能力强，训练稳定，是最自然的基线。但它对 decode 不友好：
 
-- 每层每个 token 都要缓存 $H_q$ 组 K/V。
+- 每层每个 token 都要缓存 $`H_q`$ 组 K/V。
 - decode 每生成一个 token，都需要从 HBM 读取所有历史 token 的 K/V。
 - 当 batch size、context length 变大时，KV Cache 容量和带宽会成为吞吐瓶颈。
 
@@ -129,7 +129,7 @@ $$
 2 \times B \times S \times H_q \times d \times 2\text{ bytes}
 $$
 
-如果模型有 $L$ 层，还要再乘以 $L$。这也是为什么大模型服务中，长上下文和大 batch 往往首先撞到 KV Cache 显存瓶颈，而不是权重显存瓶颈。
+如果模型有 $`L`$ 层，还要再乘以 $`L`$。这也是为什么大模型服务中，长上下文和大 batch 往往首先撞到 KV Cache 显存瓶颈，而不是权重显存瓶颈。
 
 <a id="causal-attention-kv-cache"></a>
 ### Causal Attention 与 KV Cache
@@ -145,7 +145,7 @@ KV Cache 能 work 的根本原因是：**append 新 token 后，历史 token 在
 - Embedding、RoPE、LayerNorm、MLP、LM Head 等大多数子层是 token-wise 计算。新增 token 不会改写历史 token 的这些层输出。
 - Causal mask 禁止历史 query 看到未来 key。新增 token 对历史 token 来说是未来 token，因此历史 token 的 attention output 不会被新增 token 影响。
 
-用 attention weight $A$ 看这件事最直观。把序列按“历史 token / 新 token”分块：
+用 attention weight $`A`$ 看这件事最直观。把序列按“历史 token / 新 token”分块：
 
 $$
 A =
@@ -155,15 +155,15 @@ A_{\text{new}\to\text{hist}} & A_{\text{new}\to\text{new}}
 \end{bmatrix}
 $$
 
-右上角为 0，表示历史 token 不能 attend 到新增 token。因此第 $t$ 步只有最后一行/最后一个 token 的 attention output 是新计算出来的；历史部分只是沿用上一轮结果。
+右上角为 0，表示历史 token 不能 attend 到新增 token。因此第 $`t`$ 步只有最后一行/最后一个 token 的 attention output 是新计算出来的；历史部分只是沿用上一轮结果。
 
 ![attention-output](resources/attention-output.png)
 
 因此 decode 阶段不需要重新计算完整序列的所有 Q/K/V 和 attention output。真正需要做的是：
 
-1. 计算当前 token 的 $q_t,k_t,v_t$。
-2. 将 $k_t,v_t$ append 到历史 KV Cache。
-3. 用当前 query $q_t$ attend 到完整的 $K_{1:t},V_{1:t}$，得到当前 token 的输出。
+1. 计算当前 token 的 $`q_t,k_t,v_t`$。
+2. 将 $`k_t,v_t`$ append 到历史 KV Cache。
+3. 用当前 query $`q_t`$ attend 到完整的 $`K_{1:t},V_{1:t}`$，得到当前 token 的输出。
 
 当前 token 的 attention 可以简化写成：
 
@@ -173,9 +173,9 @@ o_t
 \text{softmax}\bigl(q_t K_{1:t}^T / \sqrt{d}\bigr)V_{1:t}
 $$
 
-这也解释了为什么通常只有 KV Cache，没有 Q Cache：decode 第 $t$ 步只需要当前 token 的 $q_t$；历史 query 不会参与当前 token 的输出计算，也不需要缓存。
+这也解释了为什么通常只有 KV Cache，没有 Q Cache：decode 第 $`t`$ 步只需要当前 token 的 $`q_t`$；历史 query 不会参与当前 token 的输出计算，也不需要缓存。
 
-这就是 KV Cache 的理论基础。它把每步 decode 从“重算所有历史 token 的 K/V”变成“复用历史 K/V”，用显存换计算量；但代价是 KV Cache 会随 $B,S,H_{kv},d$ 线性增长。
+这就是 KV Cache 的理论基础。它把每步 decode 从“重算所有历史 token 的 K/V”变成“复用历史 K/V”，用显存换计算量；但代价是 KV Cache 会随 $`B,S,H_{kv},d`$ 线性增长。
 
 KV Cache 规模可以粗略写成：
 
@@ -183,7 +183,7 @@ $$
 \text{KVCache} \propto 2 \times B \times S \times H_{kv} \times d
 $$
 
-前面的 2 分别对应 K 和 V。后续 MQA/GQA/MLA 的核心目标之一，就是降低这个式子里的 $H_{kv}$ 或把 $H_{kv}d$ 压缩成更小的 latent 维度。
+前面的 2 分别对应 K 和 V。后续 MQA/GQA/MLA 的核心目标之一，就是降低这个式子里的 $`H_{kv}`$ 或把 $`H_{kv}d`$ 压缩成更小的 latent 维度。
 
 <a id="prefill-vs-decode"></a>
 ### Prefill 与 Decode
@@ -192,7 +192,7 @@ KV Cache 也解释了 LLM 推理中 Prefill 和 Decode 的区别。
 
 **Prefill** 发生在一个新请求刚进入模型时。此时没有历史 cache，模型必须对完整 prompt 做一次 forward，计算所有 prompt token 在每一层的 K/V，并写入 KV Cache。Prefill 阶段的 attention 仍然要处理完整 causal attention 矩阵，计算量主要受 prompt 长度影响。
 
-**Decode** 发生在后续逐 token 生成时。每一步只输入上一步新生成的 token，计算当前 token 的 $q_t,k_t,v_t$，把 $k_t,v_t$ 追加到 cache，然后用 $q_t$ attend 到历史所有 K/V。Decode 阶段单步计算量从 full sequence 重算变成 $O(S)$ 的 attention，但每步都要读取长度为 $S$ 的 KV Cache，因此长上下文下通常更受 HBM 读取和 KV Cache 容量限制。
+**Decode** 发生在后续逐 token 生成时。每一步只输入上一步新生成的 token，计算当前 token 的 $`q_t,k_t,v_t`$，把 $`k_t,v_t`$ 追加到 cache，然后用 $`q_t`$ attend 到历史所有 K/V。Decode 阶段单步计算量从 full sequence 重算变成 $`O(S)`$ 的 attention，但每步都要读取长度为 $`S`$ 的 KV Cache，因此长上下文下通常更受 HBM 读取和 KV Cache 容量限制。
 
 所以 KV Cache 的本质不是改变 attention 的数学结果，而是利用 causal mask 下“历史输出不变”的性质，避免重复计算历史 token 的 K/V 和历史 attention output。
 
@@ -225,7 +225,7 @@ $$
 K,V \in \mathbb{R}^{B \times S \times 1 \times d}
 $$
 
-第 $i$ 个 query head 的计算变成：
+第 $`i`$ 个 query head 的计算变成：
 
 $$
 O_i
@@ -241,9 +241,9 @@ $$
 
 #### 设计动机
 
-decode 阶段每步只处理一个 query token，主要瓶颈不是 $q_t$ 的计算，而是读取历史 $K,V$。MHA 中每个 query head 都有独立 K/V，导致每步 decode 要读 $H_q$ 份历史 K/V。
+decode 阶段每步只处理一个 query token，主要瓶颈不是 $`q_t`$ 的计算，而是读取历史 $`K,V`$。MHA 中每个 query head 都有独立 K/V，导致每步 decode 要读 $`H_q`$ 份历史 K/V。
 
-MQA 的设计非常直接：既然 Query heads 仍然可以提供多个查询视角，那么 K/V 是否一定也需要每个 head 独立？如果共享 K/V 能保留足够质量，就可以把 KV Cache 缩小到 MHA 的 $1/H_q$。
+MQA 的设计非常直接：既然 Query heads 仍然可以提供多个查询视角，那么 K/V 是否一定也需要每个 head 独立？如果共享 K/V 能保留足够质量，就可以把 KV Cache 缩小到 MHA 的 $`1/H_q`$。
 
 #### 计算缓存分析
 
@@ -275,9 +275,9 @@ $$
 <a id="gqa"></a>
 ### Grouped-Query Attention (GQA)
 
-GQA 是 MHA 和 MQA 之间的折中。它把 $H_q$ 个 query heads 分成 $H_{kv}$ 组，每组 query heads 共享一组 K/V。
+GQA 是 MHA 和 MQA 之间的折中。它把 $`H_q`$ 个 query heads 分成 $`H_{kv}`$ 组，每组 query heads 共享一组 K/V。
 
-假设 $H_q=32, H_{kv}=8$，那么每 4 个 query heads 共享一组 K/V：
+假设 $`H_q=32, H_{kv}=8`$，那么每 4 个 query heads 共享一组 K/V：
 
 ![grouped-query-attention](resources/attention-gqa.png)
 
@@ -295,8 +295,8 @@ $$
 
 特殊情况：
 
-- 当 $H_{kv}=H_q$，GQA 退化为 MHA。
-- 当 $H_{kv}=1$，GQA 退化为 MQA。
+- 当 $`H_{kv}=H_q`$，GQA 退化为 MHA。
+- 当 $`H_{kv}=1`$，GQA 退化为 MQA。
 
 #### 设计动机
 
@@ -318,7 +318,7 @@ $$
 \frac{H_{kv}}{H_q}
 $$
 
-例如 $H_q=32,H_{kv}=8$，KV Cache 约为 MHA 的 25%。相比 MQA，它多保留了几组 K/V 表示，质量通常更接近 MHA；相比 MHA，它显著降低了 decode 访存。
+例如 $`H_q=32,H_{kv}=8`$，KV Cache 约为 MHA 的 25%。相比 MQA，它多保留了几组 K/V 表示，质量通常更接近 MHA；相比 MHA，它显著降低了 decode 访存。
 
 这也是为什么 Llama、Mistral、Qwen、Gemma 等大量现代 LLM 都采用 GQA：它不是最省的方案，但通常是质量和 serving 成本之间最稳健的折中。
 
@@ -341,7 +341,7 @@ $$
 c_t^{KV} = x_t W_{DKV}
 $$
 
-其中 $c_t^{KV}$ 是低维 latent KV，维度为 $d_c$，通常显著小于 $H_qd$。 $W_{UK,h}$ 可以看作 $d_c \times d_{nope}$, $W_{UV,h}$ 可以看作 $d_c \times d_v$。
+其中 $`c_t^{KV}`$ 是低维 latent KV，维度为 $`d_c`$，通常显著小于 $`H_qd`$。 $`W_{UK,h}`$ 可以看作 $`d_c \times d_{nope}`$, $`W_{UV,h}`$ 可以看作 $`d_c \times d_v`$。
 
 每个 head 的 non-RoPE key 和 value 由 latent up-projection 得到：
 
@@ -371,7 +371,7 @@ $$
 s_{t,j,h} = q_{t,h}^{nope} \cdot k_{j,h}^{nope} + q_{t,h}^{R} \cdot k_j^R
 $$
 
-以 DeepSeek-V3/R1 类配置为例，公开 config 中 `n_heads=128`，`kv_lora_rank=512`，`qk_nope_head_dim=128`，`qk_rope_head_dim=64`，`v_head_dim=128`。因此每个 head 的 Q/K 维度可以看成 $128$ 维 non-RoPE 部分加 $64$ 维 RoPE 部分，V 维度是 $128$。decode cache 主要保存：
+以 DeepSeek-V3/R1 类配置为例，公开 config 中 `n_heads=128`，`kv_lora_rank=512`，`qk_nope_head_dim=128`，`qk_rope_head_dim=64`，`v_head_dim=128`。因此每个 head 的 Q/K 维度可以看成 $`128`$ 维 non-RoPE 部分加 $`64`$ 维 RoPE 部分，V 维度是 $`128`$。decode cache 主要保存：
 
 $$
 c_t^{KV} \in \mathbb{R}^{512}, \quad k_t^R \in \mathbb{R}^{64}
@@ -389,7 +389,7 @@ $$
 q_{t,h}^{nope} \cdot k_{j,h}^{nope}
 $$
 
-代入 $k_{j,h}^{nope}=c_j^{KV}W_{UK,h}$：
+代入 $`k_{j,h}^{nope}=c_j^{KV}W_{UK,h}`$：
 
 $$
 q_{t,h}^{nope}(c_j^{KV}W_{UK,h})^T
@@ -397,13 +397,13 @@ q_{t,h}^{nope}(c_j^{KV}W_{UK,h})^T
 q_{t,h}^{nope}W_{UK,h}^T(c_j^{KV})^T
 $$
 
-也就是先把 $W_{UK,h}^T$ 吸收到当前 query 侧：
+也就是先把 $`W_{UK,h}^T`$ 吸收到当前 query 侧：
 
 $$
 \tilde q_{t,h}^{nope}=q_{t,h}^{nope}W_{UK,h}^T
 $$
 
-然后直接和历史缓存的 $c_j^{KV}$ 做点积：
+然后直接和历史缓存的 $`c_j^{KV}`$ 做点积：
 
 $$
 s_{t,j,h}^{nope}
@@ -435,12 +435,12 @@ $$
 
 只看 non-RoPE key score 路径，设：
 
-- $s$: 当前 query token 数，decode 中 $s=1$。
-- $t$: 被 attend 的历史 / 上下文 token 数。
-- $d_c=512$: latent KV 维度。
-- $d_{nope}=128$: 每个 head 的 non-RoPE key 维度。
+- $`s`$: 当前 query token 数，decode 中 $`s=1`$。
+- $`t`$: 被 attend 的历史 / 上下文 token 数。
+- $`d_c=512`$: latent KV 维度。
+- $`d_{nope}=128`$: 每个 head 的 non-RoPE key 维度。
 
-下面按矩阵乘的 **MACs** 比较两条路径；若按 $1\text{ MAC}=2\text{ FLOPs}$，FLOPs 需要乘以 2。这里省略 RoPE score、value aggregation、head 数和常数因子。
+下面按矩阵乘的 **MACs** 比较两条路径；若按 $`1\text{ MAC}=2\text{ FLOPs}`$，FLOPs 需要乘以 2。这里省略 RoPE score、value aggregation、head 数和常数因子。
 
 **方式一：先展开 K，再做 MHA-like score**
 
@@ -472,10 +472,10 @@ $$
 
 | 场景 | 设定 | 展开成 MHA-like | 矩阵吸收 |
 | --- | --- | ---: | ---: |
-| 训练 / prefill | $s=t=163840$ | 约 $3.45$ TMACs / $6.89$ TFLOPs | 约 $13.75$ TMACs / $27.51$ TFLOPs |
-| decode | $s=1,t=163840$ | 约 $10758$ MMACs / $21517$ MFLOPs | 约 $84$ MMACs / $168$ MFLOPs |
+| 训练 / prefill | $`s=t=163840`$ | 约 $`3.45`$ TMACs / $`6.89`$ TFLOPs | 约 $`13.75`$ TMACs / $`27.51`$ TFLOPs |
+| decode | $`s=1,t=163840`$ | 约 $`10758`$ MMACs / $`21517`$ MFLOPs | 约 $`84`$ MMACs / $`168`$ MFLOPs |
 
-训练 / prefill 中 $s,t$ 都大，矩阵吸收会把 score 的内积维度从 $128$ 提到 $512$，因此更适合先展开 K/V，走 MHA-like dense attention。decode 中 $s=1$，不吸收则每步都要为 $t$ 个历史 token 展开 $K=C^{KV}W^{UK}$；吸收后只对当前 query 做一次 $Q(W^{UK})^T$，并且不用物化 per-head KV Cache。
+训练 / prefill 中 $`s,t`$ 都大，矩阵吸收会把 score 的内积维度从 $`128`$ 提到 $`512`$，因此更适合先展开 K/V，走 MHA-like dense attention。decode 中 $`s=1`$，不吸收则每步都要为 $`t`$ 个历史 token 展开 $`K=C^{KV}W^{UK}`$；吸收后只对当前 query 做一次 $`Q(W^{UK})^T`$，并且不用物化 per-head KV Cache。
 
 因此，MLA 的关键是双模：训练 / prefill 侧保留 MHA-like 高吞吐计算；decode 侧使用 MQA-like latent-cache 计算，减少长上下文下的 KV Cache 访存和显存压力。
 
@@ -492,19 +492,19 @@ $$
 <a id="swa"></a>
 ### Sliding Window Attention (SWA)
 
-标准 full attention 中，第 $i$ 个 token 可以 attend 到所有历史 token：
+标准 full attention 中，第 $`i`$ 个 token 可以 attend 到所有历史 token：
 
 $$
 j \le i
 $$
 
-SWA 只允许它 attend 到最近 $W$ 个 token：
+SWA 只允许它 attend 到最近 $`W`$ 个 token：
 
 $$
-i-W < j \le i
+i-W \lt j \le i
 $$
 
-Attention mask 从完整的下三角矩阵变成一条宽度为 $W$ 的 band：
+Attention mask 从完整的下三角矩阵变成一条宽度为 $`W`$ 的 band：
 
 $$
 O_i
@@ -522,14 +522,14 @@ $$
 
 SWA 的思路是牺牲每层的全局可见性，换取更低成本：
 
-- prefill 从 $O(S^2)$ 降到 $O(SW)$。
-- decode 每步只需要读最近 $W$ 个 token 的 KV。
+- prefill 从 $`O(S^2)`$ 降到 $`O(SW)`$。
+- decode 每步只需要读最近 $`W`$ 个 token 的 KV。
 - KV Cache 可以配合 rolling window，只保留局部窗口。
 
 #### 计算缓存分析
 
 
-SWA 在所有相关层都严格只看最近 $W$ 个 token，在推理系统实现了 rolling window KV Cache后，每一轮decode，会逐出一个 token的KV Cache，那么每层只需要保留最近窗口， 对应 layer 的 KV Cache 并不会随着上下文长度 $S$ 线性增长，而是固定在窗口大小 $W$ 上：
+SWA 在所有相关层都严格只看最近 $`W`$ 个 token，在推理系统实现了 rolling window KV Cache后，每一轮decode，会逐出一个 token的KV Cache，那么每层只需要保留最近窗口， 对应 layer 的 KV Cache 并不会随着上下文长度 $`S`$ 线性增长，而是固定在窗口大小 $`W`$ 上：
 
 $$
 \text{KVCache}_{SWA}
@@ -552,13 +552,13 @@ $$
 
 这种设计比纯 SWA 更稳健：局部层负责高频近邻依赖，全局层负责跨段检索和全局聚合。
 
-如果模型采用 local/global hybrid pattern，整体 KV Cache 介于 full attention 和纯 SWA 之间。粗略地，如果 $L_{local}$ 层使用窗口 $W$，$L_{global}$ 层使用完整上下文 $S$，总 cache 与 full attention 的比例约为：
+如果模型采用 local/global hybrid pattern，整体 KV Cache 介于 full attention 和纯 SWA 之间。粗略地，如果 $`L_{local}`$ 层使用窗口 $`W`$，$`L_{global}`$ 层使用完整上下文 $`S`$，总 cache 与 full attention 的比例约为：
 
 $$
 \frac{L_{local}W + L_{global}S}{(L_{local}+L_{global})S}
 $$
 
-SWA 的关键风险是长距离信息传递。单层 SWA 看不到窗口外的 token，但多层堆叠后，信息可以逐层向后传播。假设窗口大小为 $W$，层数为 $L$，理论上信息传播范围可以随 $LW$ 扩大。
+SWA 的关键风险是长距离信息传递。单层 SWA 看不到窗口外的 token，但多层堆叠后，信息可以逐层向后传播。假设窗口大小为 $`W`$，层数为 $`L`$，理论上信息传播范围可以随 $`LW`$ 扩大。
 
 Mistral 7B 是 SWA + GQA 的代表模型之一。它用 SWA 降低长序列推理成本，同时通过层间信息传递保留更长范围的上下文影响。
 
@@ -582,10 +582,10 @@ NSA 是 DeepSeek 在 2025 年提出的 **Natively trainable Sparse Attention**�
 
 #### 计算机制
 
-设第 $i$ 个 query 的原始可见历史为：
+设第 $`i`$ 个 query 的原始可见历史为：
 
 $$
-\mathcal{H}(i)=\{j\mid j\le i\}
+\mathcal{H}(i)=\lbrace j\mid j\le i\rbrace
 $$
 
 NSA 为每个 query 构造一个更小的 representation KV 集合：
@@ -605,12 +605,12 @@ $$
 $$
 O_i
 {}={}
-\sum_{r\in\{cmp,sel,win\}}
+\sum_{r\in\lbrace cmp,sel,win\rbrace}
  g_i^r\cdot
 \text{Attn}(q_i,K_i^r,V_i^r)
 $$
 
-其中 $g_i^r$ 是 learned gate，三条 branch 分别对应 compression、selection 和 sliding window。
+其中 $`g_i^r`$ 是 learned gate，三条 branch 分别对应 compression、selection 和 sliding window。
 
 **1. Token Compression**
 
@@ -628,7 +628,7 @@ compressed tokens 覆盖全局上下文，但数量远小于原始 token 数。�
 
 只靠 compressed tokens 会丢失细粒度信息，因此 NSA 还会选择若干重要的原始 token blocks。关键点是：选择单位是连续 block，而不是任意离散 token。
 
-NSA 使用 query 对 compressed keys 的 attention score 来推导 selection block 的重要性，然后选择 top-$n$ 个 block：
+NSA 使用 query 对 compressed keys 的 attention score 来推导 selection block 的重要性，然后选择 top-$`n`$ 个 block：
 
 $$
 \mathcal{B}_i^{sel}
@@ -680,7 +680,7 @@ $$
 O(S^2H_qd)
 $$
 
-这里讨论的是 $QK^T$ 和 $AV$ 这类 attention kernel 的 big-O 量级。如果严格换成 FLOPs，还需要把 MACs 乘以约 2，并区分 causal mask 下的可见 token 对数、$d_q$ 与 $d_v$ 是否相同等常数项。
+这里讨论的是 $`QK^T`$ 和 $`AV`$ 这类 attention kernel 的 big-O 量级。如果严格换成 FLOPs，还需要把 MACs 乘以约 2，并区分 causal mask 下的可见 token 对数、$`d_q`$ 与 $`d_v`$ 是否相同等常数项。
 
 NSA 每个 query 实际访问的 KV 数量由三部分组成：
 
@@ -725,9 +725,9 @@ DeepSeek-V3.2 是从 DeepSeek-V3.1-Terminus 继续训练得到的。论文中明
 DSA 原型由两部分组成：
 
 1. **Lightning indexer**：计算 query token 和历史 token / KV entry 之间的 index score。
-2. **Fine-grained token selection**：根据 index score 选择 top-$k$ KV entries，再用这些 selected K/V 做主 attention。
+2. **Fine-grained token selection**：根据 index score 选择 top-$`k`$ KV entries，再用这些 selected K/V 做主 attention。
 
-论文中把第 $t$ 个 query token $\mathbf{h}_t$ 和第 $s$ 个历史 token $\mathbf{h}_s$ 的 index score 写成：
+论文中把第 $`t`$ 个 query token $`\mathbf{h}_t`$ 和第 $`s`$ 个历史 token $`\mathbf{h}_s`$ 的 index score 写成：
 
 $$
 I_{t,s}
@@ -739,19 +739,19 @@ $$
 
 其中 $`H^I`$ 是 indexer heads 数量，$`\mathbf{q}_{t,j}^{I}`$ 和 $`w_{t,j}^{I}`$ 来自当前 query token，$`\mathbf{k}_{s}^{I}`$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
 
-有了 $I_{t,s}$ 之后，DSA 只取 top-$k$ 对应的 KV entries：
+有了 $`I_{t,s}`$ 之后，DSA 只取 top-$`k`$ 对应的 KV entries：
 
 $$
 \mathcal{S}_t
 {}={}
-\{
+\lbrace
 s
 \mid
 I_{t,s}\in \text{Top-k}(I_{t,:})
-\}
+\rbrace
 $$
 
-最终主 attention 仍然是 softmax attention，只是 K/V 集合从完整历史变成 selected set。由于 DSA 在 DeepSeek-V3.2 中基于 MLA 实例化，这里的 $\mathbf{c}_s$ 可以理解为 MLA 的 latent KV entry：
+最终主 attention 仍然是 softmax attention，只是 K/V 集合从完整历史变成 selected set。由于 DSA 在 DeepSeek-V3.2 中基于 MLA 实例化，这里的 $`\mathbf{c}_s`$ 可以理解为 MLA 的 latent KV entry：
 
 $$
 \mathbf{u}_t
@@ -759,11 +759,11 @@ $$
 \text{Attn}
 (
 \mathbf{h}_t,
-\{
+\lbrace
 \mathbf{c}_s
 \mid
 s\in\mathcal{S}_t
-\}
+\rbrace
 )
 $$
 
@@ -785,13 +785,13 @@ DSA 的思路是：不再让每个 query attend 到全部历史 latent KV，而�
 
 #### 计算缓存分析
 
-如果 full MLA attention 对每个 query 访问完整历史长度 $S$，主 attention 的复杂度可以粗略写成：
+如果 full MLA attention 对每个 query 访问完整历史长度 $`S`$，主 attention 的复杂度可以粗略写成：
 
 $$
 O(SH_qd)
 $$
 
-DSA 每个 query 只选择 $K_s$ 个 KV entries，主 attention 变成：
+DSA 每个 query 只选择 $`K_s`$ 个 KV entries，主 attention 变成：
 
 $$
 O(K_sH_qd)
@@ -846,13 +846,13 @@ $$
 Z^a = HW_Z^a,\quad Z^b = HW_Z^b
 $$
 
-然后每 $m$ 个 token 压缩成一个 compressed KV entry。DeepSeek-V4 中 CSA 的压缩率为：
+然后每 $`m`$ 个 token 压缩成一个 compressed KV entry。DeepSeek-V4 中 CSA 的压缩率为：
 
 $$
 m=4
 $$
 
-在 vLLM/SGLang 的实现讨论里，这一路通常也被称为 `c4a`：先把序列长度压到约 $1/4$，再对 compressed KV 做 sparse top-k attention。
+在 vLLM/SGLang 的实现讨论里，这一路通常也被称为 `c4a`：先把序列长度压到约 $`1/4`$，再对 compressed KV 做 sparse top-k attention。
 
 简化来看，压缩就是对一个局部 token group 做带可学习 positional bias 的 softmax weighted pooling：
 
@@ -863,7 +863,7 @@ C_i^{comp}
 \text{softmax}(Z_j + B) \odot C_j
 $$
 
-技术报告中的 CSA 还使用了两路 $C^a,C^b$ 和 overlap compression：一个 compressed entry 会聚合当前 group 和前一个 group 的信息，使压缩后的 KV 既减少长度，又保留边界附近的上下文连续性。
+技术报告中的 CSA 还使用了两路 $`C^a,C^b`$ 和 overlap compression：一个 compressed entry 会聚合当前 group 和前一个 group 的信息，使压缩后的 KV 既减少长度，又保留边界附近的上下文连续性。
 
 得到 compressed KV 后，CSA 使用 lightning indexer 对压缩后的 KV blocks 打分，并选择 top-k compressed KV entries：
 
@@ -884,7 +884,7 @@ I_{t,s}
 \text{ReLU}(q_{t,h}^I \cdot K_s^{IComp})
 $$
 
-最终 core attention 不是 attend 到原始 $S$ 个 token，而是 attend 到 top-k 个 compressed KV：
+最终 core attention 不是 attend 到原始 $`S`$ 个 token，而是 attend 到 top-k 个 compressed KV：
 
 $$
 O_t^{CSA}
@@ -910,9 +910,9 @@ $$
 
 *图片来源：[DeepSeek-V4 Technical Report, Figure 4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)*
 
-对应实现里常称为 `c128a`：把远距离上下文压到约 $1/128$ 后，对 compressed KV 做 dense attention。
+对应实现里常称为 `c128a`：把远距离上下文压到约 $`1/128`$ 后，对 compressed KV 做 dense attention。
 
-每 $m'$ 个 token 被压成一个 compressed KV entry：
+每 $`m'`$ 个 token 被压成一个 compressed KV entry：
 
 $$
 C_i^{comp}
@@ -929,7 +929,7 @@ O_t^{HCA}
 \text{Attn}(q_t,C^{comp},C^{comp})
 $$
 
-因为序列长度已经从 $S$ 压到约 $S/128$，dense attention 的成本可以接受。HCA 的作用不是精确选择少量重要 block，而是用很低成本提供全局摘要信号。
+因为序列长度已经从 $`S`$ 压到约 $`S/128`$，dense attention 的成本可以接受。HCA 的作用不是精确选择少量重要 block，而是用很低成本提供全局摘要信号。
 
 #### 为什么还需要 local SWA branch
 
@@ -958,7 +958,7 @@ $$
 
 DeepSeek-V4 的 CSA/HCA 还包含几个重要细节：
 
-- **低秩 query 生成**：先把 query hidden state 下投影成 latent query $c_t^Q$，再上投影出多头 query。CSA 中 indexer query 和 core attention query 共享这个 latent query。
+- **低秩 query 生成**：先把 query hidden state 下投影成 latent query $`c_t^Q`$，再上投影出多头 query。CSA 中 indexer query 和 core attention query 共享这个 latent query。
 - **Q/KV RMSNorm**：core attention 前对每个 query head 和唯一 compressed KV head 做 RMSNorm，控制 attention logits 尺度。
 - **Partial RoPE**：对 query、compressed KV、core attention output 的最后 64 维应用 RoPE。由于 compressed KV 同时作为 key 和 value，attention output 会携带绝对位置信息，V4 再对 output 的 RoPE 维度施加负位置 RoPE，使输出保留相对位置信息。
 - **Attention Sink**：每个 head 有可学习 sink logit，加入 softmax denominator，使某个 query head 可以把总 attention mass 调低，甚至接近 0。这对噪声上下文或无关 compressed blocks 更稳健。
@@ -982,7 +982,7 @@ $$
 - KV Cache 的有效长度先缩短。
 - lightning indexer 的搜索空间变小。
 - sparse attention 的 gather 范围变小。
-- HCA 用 $S/128$ 的 dense compressed attention 补充全局摘要。
+- HCA 用 $`S/128`$ 的 dense compressed attention 补充全局摘要。
 - local SWA branch 弥补压缩导致的局部细节损失。
 
 #### 工程分析
@@ -1019,7 +1019,7 @@ GatedDeltaNet 不是 sparse attention，也不是 MHA/GQA/MLA 这类 head layout
 标准 softmax attention 的 decode 记忆是随序列增长的 token-level KV Cache：
 
 $$
-\{(k_1,v_1), (k_2,v_2), \ldots, (k_t,v_t)\}
+\lbrace (k_1,v_1), (k_2,v_2), \ldots, (k_t,v_t)\rbrace
 $$
 
 GatedDeltaNet 则把历史信息写入一个矩阵状态：
@@ -1062,7 +1062,7 @@ S_{t-1}(I-\beta_t k_tk_t^T)
 \beta_t v_tk_t^T
 $$
 
-其中 $\beta_t$ 是 writing strength，$S_{t-1}k_t$ 可以理解为当前 state 中和 $k_t$ 关联的旧 value。Delta rule 先减掉旧关联，再写入新的 $v_t$，因此比 vanilla linear attention 的盲目累加更适合 associative recall。
+其中 $`\beta_t`$ 是 writing strength，$`S_{t-1}k_t`$ 可以理解为当前 state 中和 $`k_t`$ 关联的旧 value。Delta rule 先减掉旧关联，再写入新的 $`v_t`$，因此比 vanilla linear attention 的盲目累加更适合 associative recall。
 
 GatedDeltaNet 在 delta rule 外再加一个 data-dependent decay gate：
 
@@ -1077,9 +1077,9 @@ S_{t-1}
 \beta_t v_tk_t^T
 $$
 
-其中 $\alpha_t\in(0,1)$ 控制 state decay。当 $\alpha_t\rightarrow 1$ 时，它接近 DeltaNet，保留历史并做定向更新；当 $\alpha_t\rightarrow 0$ 时，旧 state 被快速衰减，模型可以清理无关记忆。也就是说，GatedDeltaNet 把 memory clearance 和 key-value association learning 放进了同一个 recurrent update。
+其中 $`\alpha_t\in(0,1)`$ 控制 state decay。当 $`\alpha_t\rightarrow 1`$ 时，它接近 DeltaNet，保留历史并做定向更新；当 $`\alpha_t\rightarrow 0`$ 时，旧 state 被快速衰减，模型可以清理无关记忆。也就是说，GatedDeltaNet 把 memory clearance 和 key-value association learning 放进了同一个 recurrent update。
 
-<!-- 论文中的实际 block 还包含 Q/K/V projection、short convolution、SiLU、Q/K L2 norm、$\alpha/\beta$ projection 和 output gate。这些组件服务于语言建模稳定性和吞吐，不改变上面的核心递推。 -->
+<!-- 论文中的实际 block 还包含 Q/K/V projection、short convolution、SiLU、Q/K L2 norm、$`\alpha/\beta`$ projection 和 output gate。这些组件服务于语言建模稳定性和吞吐，不改变上面的核心递推。 -->
 
 #### 设计动机
 
@@ -1089,7 +1089,7 @@ GatedDeltaNet 的设计动机来自三个缺口：
 - Mamba2 这类 gated recurrent model 有遗忘能力，但它的 decay 更像对所有 association 做统一缩放，定向修改能力有限。
 - DeltaNet 有更强的 key-value association 更新能力，但缺少快速清空无关历史的 gate。
 
-GatedDeltaNet 的组合点正在这里：用 $\alpha_t$ 做 adaptive forgetting，用 $\beta_t$ 和 delta rule 做 targeted update。它牺牲了 softmax attention 的显式全历史检索，换来固定 state 形式的长上下文效率；所以在现代 LLM 中更常作为 softmax attention 的补充层，而不是完全替代所有 attention 层。
+GatedDeltaNet 的组合点正在这里：用 $`\alpha_t`$ 做 adaptive forgetting，用 $`\beta_t`$ 和 delta rule 做 targeted update。它牺牲了 softmax attention 的显式全历史检索，换来固定 state 形式的长上下文效率；所以在现代 LLM 中更常作为 softmax attention 的补充层，而不是完全替代所有 attention 层。
 
 #### 计算缓存分析
 
@@ -1122,7 +1122,7 @@ $$
 o_t=S_tq_t
 $$
 
-因此每步成本主要和 $d_vd_k$ 相关，而不是和历史长度 $S$ 相关。长上下文 decode 下，这能避免持续读取越来越大的 KV Cache，尤其适合 memory-bound 场景。
+因此每步成本主要和 $`d_vd_k`$ 相关，而不是和历史长度 $`S`$ 相关。长上下文 decode 下，这能避免持续读取越来越大的 KV Cache，尤其适合 memory-bound 场景。
 
 训练阶段如果逐 token 串行递推，GPU 并行度会很差。GatedDeltaNet 论文沿用并扩展 DeltaNet 的 chunkwise parallel algorithm / WY representation，把 chunk 内递推改写成矩阵乘法，让训练能使用 tensor core。
 
@@ -1189,7 +1189,7 @@ $$
 \text{softmax}\bigl(\frac{QK^T}{\sqrt{d}} + M\bigr)V
 $$
 
-它优化的是 exact attention 的 GPU 执行方式。核心判断是：长序列 attention 不只受 FLOPs 限制，更容易受 HBM 读写限制；因此 FlashAttention 把 $Q,K,V$ 分块放入 SRAM/register，用 online softmax 流式计算，避免 materialize $S\times S$ score/probability 矩阵。它保持 exact attention，同时显著减少 HBM read/write。
+它优化的是 exact attention 的 GPU 执行方式。核心判断是：长序列 attention 不只受 FLOPs 限制，更容易受 HBM 读写限制；因此 FlashAttention 把 $`Q,K,V`$ 分块放入 SRAM/register，用 online softmax 流式计算，避免 materialize $`S\times S`$ score/probability 矩阵。它保持 exact attention，同时显著减少 HBM read/write。
 
 ![flashattention-kernel](resources/attention-flashattention-io.png)
 
@@ -1207,11 +1207,11 @@ $$
 QK^T \in \mathbb{R}^{S \times S}
 $$
 
-然后写入 HBM，再读回来做 softmax，再写入 attention probabilities，再读回来乘以 $V$。长序列下，$S^2$ 中间矩阵非常大，HBM 读写成为瓶颈。
+然后写入 HBM，再读回来做 softmax，再写入 attention probabilities，再读回来乘以 $`V`$。长序列下，$`S^2`$ 中间矩阵非常大，HBM 读写成为瓶颈。
 
 #### 优化机制
 
-FlashAttention 把 $Q,K,V$ 分块加载到 GPU SRAM/register，按 tile 计算局部 score，并使用 online softmax 维护每一行的归一化统计量。
+FlashAttention 把 $`Q,K,V`$ 分块加载到 GPU SRAM/register，按 tile 计算局部 score，并使用 online softmax 维护每一行的归一化统计量。
 
 对每一行 softmax，需要维护：
 
@@ -1223,7 +1223,7 @@ $$
 l_i = \sum_j \exp(s_{ij}-m_i)
 $$
 
-当新的 tile 到来时，更新 $m_i,l_i$，并同步更新累积输出 $O_i$。这样就不需要把完整 $S \times S$ score/probability 矩阵写回 HBM。
+当新的 tile 到来时，更新 $`m_i,l_i`$，并同步更新累积输出 $`O_i`$。这样就不需要把完整 $`S \times S`$ score/probability 矩阵写回 HBM。
 
 简化伪代码如下。这里省略 batch/head 维度，只看一个 attention head；注释中显式标出哪些变量常驻 SRAM/register：
 
@@ -1270,7 +1270,7 @@ def flash_attention(Q, K, V, block_q, block_k):
     return O
 ```
 
-这段伪代码的关键不是少做了 $QK^T$，而是把完整矩阵拆成 tile 流式处理。`Qi/Kj/Vj/Sij/Pij/mi/li/Oi` 都是 tile 级别的 SRAM/register 临时状态；只有输入 `Q/K/V` 和最终输出 `O` 常驻 HBM。旧 tile 的输出会随着新的 row max 被重新缩放，因此最终结果仍然等价于 exact softmax attention。
+这段伪代码的关键不是少做了 $`QK^T`$，而是把完整矩阵拆成 tile 流式处理。`Qi/Kj/Vj/Sij/Pij/mi/li/Oi` 都是 tile 级别的 SRAM/register 临时状态；只有输入 `Q/K/V` 和最终输出 `O` 常驻 HBM。旧 tile 的输出会随着新的 row max 被重新缩放，因此最终结果仍然等价于 exact softmax attention。
 
 #### 版本演进
 
@@ -1278,7 +1278,7 @@ FlashAttention 后续版本基本都没有改变“tiling + online softmax + 不
 
 | Version | 主要改动 | 核心目标 |
 | --- | --- | --- |
-| FlashAttention-1 | 提出 IO-aware exact attention：分块读取 $Q/K/V$，用 online softmax 流式计算输出，避免把 $S\times S$ score/probability 矩阵写回 HBM。 | 把 attention 从 memory-bound 的朴素实现，改成 HBM IO 更少的 fused kernel。 |
+| FlashAttention-1 | 提出 IO-aware exact attention：分块读取 $`Q/K/V`$，用 online softmax 流式计算输出，避免把 $`S\times S`$ score/probability 矩阵写回 HBM。 | 把 attention 从 memory-bound 的朴素实现，改成 HBM IO 更少的 fused kernel。 |
 | FlashAttention-2 | 改进 work partitioning：减少 non-matmul FLOPs；把单个 head 的计算拆到更多 thread blocks，提高 occupancy；优化 warp 之间的任务划分，减少 shared memory 通信。 | 让 kernel 更接近 GEMM 效率，在 A100 等 GPU 上比 FA1 更快。 |
 | FlashAttention-3 | 面向 Hopper / H100：利用 Tensor Core 与 TMA 的异步能力，使用 warp specialization 重叠数据搬运和计算；交错 matmul 与 softmax；支持更好的 FP8 low-precision attention。 | 利用 Hopper 硬件特性，提高异步流水线和低精度吞吐。 |
 | FlashAttention-4 | 面向 Blackwell / B200：针对 tensor core 吞吐翻倍但 shared memory bandwidth、exp 单元等未等比例增长的非对称硬件缩放，重新设计 pipeline；使用更大的 tile、fully async MMA、软件模拟 exponential / conditional softmax rescale，并优化 backward 中的 tensor memory / 2-CTA MMA 路径。 | 把瓶颈从非 matmul 操作和 shared memory traffic 中继续挤出来，适配 Blackwell 的新性能比例。 |
@@ -1318,7 +1318,7 @@ def score_mod(score, b, h, q_idx, kv_idx):
     return score
 ```
 
-例如 ALiBi / relative position bias / local boost / soft-capping 都可以写成 score-level 变换，而不需要显式 materialize 一个 $S\times S$ bias matrix：
+例如 ALiBi / relative position bias / local boost / soft-capping 都可以写成 score-level 变换，而不需要显式 materialize 一个 $`S\times S`$ bias matrix：
 
 ```python
 def alibi(score, b, h, q_idx, kv_idx):
@@ -1482,7 +1482,7 @@ RadixAttention 最适合 shared-prefix workload：长 system prompt、retrieval-
 
 Ring Attention 是长上下文训练中的分布式 exact attention 执行方式。它不改变 attention 公式，也不稀疏化连接；它解决的是单卡放不下长序列时，如何把 sequence 维度切到多张 GPU 上，并且让通信和计算重叠。
 
-假设把长度为 $S$ 的序列切到 $P$ 张 GPU 上，每张 GPU 持有一段本地 query block：
+假设把长度为 $`S`$ 的序列切到 $`P`$ 张 GPU 上，每张 GPU 持有一段本地 query block：
 
 $$
 Q^{(p)},K^{(p)},V^{(p)},\quad p=0,\ldots,P-1
@@ -1500,7 +1500,7 @@ for step in range(num_devices):
     K_block, V_block = ring_send_recv(K_block, V_block)
 ```
 
-每张 GPU 在任意时刻只需要保存本地 Q block、本地/当前传入的 K/V block，以及 online softmax accumulator。经过 $P$ 轮之后，本地 query 已经看过所有设备上的 K/V，得到的结果仍然等价于 full attention。
+每张 GPU 在任意时刻只需要保存本地 Q block、本地/当前传入的 K/V block，以及 online softmax accumulator。经过 $`P`$ 轮之后，本地 query 已经看过所有设备上的 K/V，得到的结果仍然等价于 full attention。
 
 它和 FlashAttention 的关系很紧：FlashAttention 是单卡或单设备内的 tile-level IO 优化；Ring Attention 是多设备 sequence parallel 的调度方式。实际实现中，Ring Attention 通常也会在每个本地 block 上使用 FlashAttention-like online softmax，并把下一块 K/V 的通信隐藏在当前 block 的 attention 计算后面。
 
