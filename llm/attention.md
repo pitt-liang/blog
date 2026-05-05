@@ -41,7 +41,7 @@
 - Decode 阶段每次只生成一个 token，计算量看起来是 $O(S)$，但必须从 HBM 读取历史 KV Cache，瓶颈经常从算力转为显存容量和显存带宽。
 - 长上下文会同时放大两类问题：prefill 的 quadratic compute 和 decode 的 KV Cache 读写。
 
-理解这些机制时，可以先抓住一条主线：标准 causal attention 如何工作，KV Cache 为什么能复用，以及后续各种变体分别在压缩 KV、稀疏化连接、改变记忆形式或优化 kernel IO 上做了什么取舍。
+理解这些机制，可以从一个问题出发：标准 causal attention 需要让当前 token 读取全部历史信息，而 KV Cache 虽然避免了重复计算，却让长上下文推理越来越受显存和带宽限制。后续各种 attention 变体的差异，主要就在于它们选择压缩什么：压缩 KV 表示、稀疏化历史连接、把历史写成 recurrent state，或者优化 exact attention 的 kernel IO。
 
 下面统一使用这些符号：
 
@@ -672,11 +672,13 @@ NSA 主要针对传统 sparse attention 的两个问题。
 
 #### 计算缓存分析
 
-Full attention 的 prefill / training 主体复杂度近似为：
+Full attention 在 prefill / training 中的核心 attention 计算量级近似为：
 
 $$
 O(S^2H_qd)
 $$
+
+这里讨论的是 $QK^T$ 和 $AV$ 这类 attention kernel 的 big-O 量级。如果严格换成 FLOPs，还需要把 MACs 乘以约 2，并区分 causal mask 下的可见 token 对数、$d_q$ 与 $d_v$ 是否相同等常数项。
 
 NSA 每个 query 实际访问的 KV 数量由三部分组成：
 
@@ -686,7 +688,7 @@ N_{NSA}
 N_{cmp}+N_{sel}+W
 $$
 
-因此 attention 主体可以近似写成：
+因此 NSA 的核心 attention 计算量级可以近似写成：
 
 $$
 O(S\cdot N_{NSA}\cdot H_qd)
@@ -694,16 +696,16 @@ $$
 
 这解释了为什么 NSA 在长序列训练和 prefill 中能明显加速。论文在 64k context 的 Triton kernel 对比中报告，NSA 相比 FlashAttention-2 风格 full attention，forward 最高约 9.0x，backward 最高约 6.0x。
 
-decode 阶段更偏 memory-bound。Full attention 每步需要读取全部历史 KV；NSA 只需要读取 compressed tokens、selected blocks 和 sliding window。论文给出的 decoding memory access volume 可以概括为：
+decode 阶段更偏 memory-bound。Full attention 每步需要读取全部历史 KV；NSA 只需要读取 compressed tokens、selected blocks 和 sliding window。论文 Table 4 给出的 decoding memory access volume 单位是 **每次 attention 操作需要访问的等效 token 数**，可以概括为：
 
-| Context length | Full Attention | NSA | Expected speedup |
+| Context length | Full Attention equivalent tokens | NSA equivalent tokens | Expected speedup |
 | --- | ---: | ---: | ---: |
 | 8K | 8192 | 2048 | 4.0x |
 | 16K | 16384 | 2560 | 6.4x |
 | 32K | 32768 | 3584 | 9.1x |
 | 64K | 65536 | 5632 | 11.6x |
 
-这里的重点和 MLA 类似：长上下文 decode 的瓶颈经常是 HBM 读取，而不是单纯 MACs。NSA 通过 blockwise sparse KV 读取减少 memory access；同时通过 group-centric kernel loading 和 shared KV fetching，避免“理论 sparse，实际访存仍很散”的问题。
+这里的重点和 MLA 类似：长上下文 decode 的瓶颈经常是 HBM 读取，而不是单纯 MACs。NSA 通过 blockwise sparse KV 读取和 shared KV fetching 降低等效访问 token 数，从而减少 memory access。
 
 <a id="dsa"></a>
 ### DeepSeek Sparse Attention (DSA)
