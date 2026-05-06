@@ -118,19 +118,9 @@ $$
 
 #### 计算缓存分析
 
-MHA 的优点是表达能力强，训练稳定，是最自然的基线。但它对 decode 不友好：
+MHA 的优点是表达能力强，训练稳定，是最自然的 attention baseline。它的代价会在 decode 阶段集中体现：系统需要为每层每个 token 保留 $`H_q`$ 组 K/V，因此 MHA 也是后面分析 KV Cache 容量和访存压力的基线。
 
-- 每层每个 token 都要缓存 $`H_q`$ 组 K/V。
-- decode 每生成一个 token，都需要从 HBM 读取所有历史 token 的 K/V。
-- 当 batch size、context length 变大时，KV Cache 容量和带宽会成为吞吐瓶颈。
-
-以 FP16/BF16 为例，单层 KV Cache 约为：
-
-$$
-2 \times B \times S \times H_q \times d \times 2\text{ bytes}
-$$
-
-如果模型有 $`L`$ 层，还要再乘以 $`L`$。这也是为什么大模型服务中，长上下文和大 batch 往往首先撞到 KV Cache 显存瓶颈，而不是权重显存瓶颈。
+具体为什么可以缓存 K/V、cache 如何随 $`B,S,H_{kv},d`$ 增长，以及为什么长上下文 decode 容易受 HBM 带宽限制，下一章会单独展开。
 
 <a id="kvcache"></a>
 ## 3. KVCache
@@ -203,15 +193,15 @@ $$
 
 这也解释了为什么通常只有 KV Cache，没有 Q Cache：decode 第 $`t`$ 步只需要当前 token 的 $`q_t`$；历史 query 不会参与当前 token 的输出计算，也不需要缓存。
 
-这就是 KV Cache 的理论基础。它把每步 decode 从“重算所有历史 token 的 K/V”变成“复用历史 K/V”，用显存换计算量；但代价是 KV Cache 会随 $`B,S,H_{kv},d`$ 线性增长。
-
-KV Cache 规模可以粗略写成：
+这就是 KV Cache 的理论基础。它把每步 decode 从“重算所有历史 token 的 K/V”变成“复用历史 K/V”，用显存换计算量；但代价是 KV Cache 会随 $`B,S,L,H_{kv},d`$ 线性增长。若数据类型大小为 $`b`$ bytes，全模型 KV Cache 规模约为：
 
 $$
-\text{KVCache} \propto 2 \times B \times S \times H_{kv} \times d
+\text{KVCache}
+\approx
+2 \times B \times S \times L \times H_{kv} \times d \times b
 $$
 
-前面的 2 分别对应 K 和 V。后续 MQA/GQA/MLA 的核心目标之一，就是降低这个式子里的 $`H_{kv}`$ 或把 $`H_{kv}d`$ 压缩成更小的 latent 维度。
+其中 2 分别对应 K 和 V，$`L`$ 是层数；对 MHA 来说 $`H_{kv}=H_q`$，FP16/BF16 下 $`b=2`$。这也是为什么大模型服务中，长上下文和大 batch 往往首先撞到 KV Cache 显存容量和 HBM 读取带宽瓶颈，而不是单纯的权重显存瓶颈。后续 MQA/GQA/MLA 的核心目标之一，就是降低这个式子里的 $`H_{kv}`$ 或把 $`H_{kv}d`$ 压缩成更小的 latent 维度。
 
 <a id="prefill-vs-decode"></a>
 ### 3.2 Prefill 与 Decode
@@ -229,7 +219,7 @@ KV Cache 也解释了 LLM 推理中 Prefill 和 Decode 的区别。
 1. **Head/KV 表示压缩**：以 MHA 为 baseline，MQA/GQA/MLA 主要降低 decode 阶段 KV Cache 容量和 HBM 读取。
 2. **长上下文 Attention 压缩**：SWA/NSA/DSA/DeepSeek-V4 主要压缩每个 query 实际访问的历史 token/block；GatedDeltaNet 则把历史 token-level KV Cache 压成 recurrent state。
 
-FlashAttention、FlexAttention、PagedAttention、RadixAttention、Ring Attention 等则属于另一类问题：它们不直接改变 attention 的数学语义，而是优化 exact attention 的 kernel IO、可编程 kernel 生成、KV Cache 管理、prefix cache 复用或分布式执行，本文最后单独放在 Kernel / 系统优化里讨论。
+除了改变模型侧的 attention 结构，系统层也会围绕同一个瓶颈做优化：如何更少地读写 HBM、如何更高效地管理 KV Cache、如何复用共享前缀，以及如何把长序列 attention 分布到多设备上。本文最后会把这些内容放到 Kernel / 系统优化里单独讨论。
 
 <a id="kv-compression"></a>
 ## 4. Head/KV 表示压缩
@@ -239,7 +229,7 @@ FlashAttention、FlexAttention、PagedAttention、RadixAttention、Ring Attentio
 <a id="mqa"></a>
 ### 4.1 Multi-Query Attention (MQA)
 
-MQA 的核心变化是：保留多个 Query heads，但所有 Query heads 共享同一组 K/V。
+MQA 最早由 *Fast Transformer Decoding: One Write-Head is All You Need* 提出。它的核心变化是：保留多个 Query heads，但所有 Query heads 共享同一组 K/V。
 
 ![multi-query-attention](resources/attention-mqa.png)
 
@@ -275,13 +265,15 @@ MQA 的设计非常直接：既然 Query heads 仍然可以提供多个查询视
 
 #### 计算缓存分析
 
-MQA 的 KV Cache 规模为：
+代入前面的 KV Cache 公式，MQA 因为 $`H_{kv}=1`$，全模型 cache 规模约为：
 
 $$
-O(B \times S \times 1 \times d)
+\text{KVCache}_{MQA}
+\approx
+2 \times B \times S \times L \times 1 \times d \times b
 $$
 
-相对 MHA 的收益非常明显：
+而 MHA 中 $`H_{kv}=H_q`$，所以相对 MHA 的比例为：
 
 $$
 \frac{\text{KVCache}_{MQA}}{\text{KVCache}_{MHA}}
@@ -330,14 +322,14 @@ $$
 
 MQA 的问题是共享太强，质量可能下降。MHA 的问题是 KV Cache 太大。GQA 的目标是在二者之间找一个更好的工程点：让几个 query heads 共享一套 K/V，但不要让所有 query heads 都共享同一套 K/V。
 
-GQA 论文还提出了从已有 MHA checkpoint uptrain 到 GQA/MQA 的方式，而不是必须从头训练一个新模型。这使得已有模型可以用较小训练成本迁移到更高效的 attention 结构。
-
 #### 计算缓存分析
 
-GQA 的 KV Cache 规模为：
+代入同一个 KV Cache 公式，GQA 的全模型 cache 规模约为：
 
 $$
-O(B \times S \times H_{kv} \times d)
+\text{KVCache}_{GQA}
+\approx
+2 \times B \times S \times L \times H_{kv} \times d \times b
 $$
 
 相对 MHA 的 KV Cache 比例为：
@@ -346,32 +338,42 @@ $$
 \frac{H_{kv}}{H_q}
 $$
 
-例如 $`H_q=32,H_{kv}=8`$，KV Cache 约为 MHA 的 25%。相比 MQA，它多保留了几组 K/V 表示，质量通常更接近 MHA；相比 MHA，它显著降低了 decode 访存。
-
-这也是为什么 Llama、Mistral、Qwen、Gemma 等大量现代 LLM 都采用 GQA：它不是最省的方案，但通常是质量和 serving 成本之间最稳健的折中。
+例如 $`H_q=32,H_{kv}=8`$，KV Cache 约为 MHA 的 25%。相比 MQA，它多保留了几组 K/V 表示，质量通常更接近 MHA；相比 MHA，它显著降低了 decode 访存。因此，GQA 通常是质量和 serving 成本之间的稳健折中。
 
 <a id="mla"></a>
 ### 4.3 Multi-Head Latent Attention (MLA)
 
-MLA 是 DeepSeek-V2 引入的 attention 结构。它不是继续减少 KV heads，而是改变 K/V 的缓存表示：**保留多 query heads，但把历史 K/V cache 从 per-head K/V 改成 latent KV + RoPE key**。
-
-这个设计天然支持两种模式：训练 / prefill 时把 latent 展开成 per-head K/V，走 MHA-like dense attention；decode 时缓存共享 latent KV，通过矩阵吸收避免物化完整 MHA-style KV Cache。
+MLA 是 DeepSeek-V2 引入的 attention 结构。它的出发点不是继续减少 KV heads，而是借鉴 LoRA 的低秩分解思路，把每个 token 需要缓存的 K/V 表示压到一个更小的 latent space。
 
 ![multi-head-latent-attention](resources/attention-mla.png)
 
 *图片来源：[DeepSeek-V2, Figure 3](https://arxiv.org/html/2405.04434v5/x3.png)*
 
-#### 计算机制
+#### 低秩 KV Cache
 
-沿用前文 row-vector 约定，MLA 先把 K/V 压到共享 latent：
+MQA/GQA 主要通过减少 K/V heads 的数量来压缩 KV Cache：MHA 保存 $`H_q`$ 组 K/V，GQA 保存 $`H_{kv}`$ 组 K/V，MQA 只保存 1 组 K/V。
+
+MLA 换了一个方向：即使保留多 query heads，也不一定要把每个 token 的历史 K/V 按 per-head 形式完整保存下来。它先把 K/V 投影到更低维的 latent 表示中缓存，需要参与 attention 时再恢复到各个 head 的表示空间。因此，MLA 压缩的是每个 token 存下来的 K/V 表示维度。
+
+先暂时不考虑位置编码。MLA 的主干可以看成一个低秩 K/V 分解：每个 token 先通过 down-projection 得到一份共享 latent KV：
 
 $$
 c_t^{KV} = x_t W_{DKV}
 $$
 
-其中 $`c_t^{KV}`$ 是低维 latent KV，维度为 $`d_c`$，通常显著小于 $`H_qd`$。 $`W_{UK,h}`$ 可以看作 $`d_c \times d_{nope}`$, $`W_{UV,h}`$ 可以看作 $`d_c \times d_v`$。
+推理时，KV Cache 里主要保存这份低维 latent，而不是为每个 head 保存完整 K/V。当某个 head 需要参与 attention 计算时，再从 latent up-project 出这个 head 对应的 key 和 value：
 
-每个 head 的 non-RoPE key 和 value 由 latent up-projection 得到：
+$$
+k_{t,h} = c_t^{KV} W_{UK,h},
+\quad
+v_{t,h} = c_t^{KV} W_{UV,h}
+$$
+
+这样，MLA 在逻辑上仍然可以得到每个 head 自己的 K/V 表示，但物理缓存的是更小的 $`c_t^{KV}`$。per-head K/V 是从 latent 临时恢复出来的，而不是长期写入 KV Cache。
+
+#### RoPE 支持
+
+RoPE 带有位置相关旋转，不能简单混入上面的低秩 latent 路径，所以 DeepSeek-style MLA 会把 non-RoPE key/value 和 RoPE key 分开。对应地，non-RoPE key 和 value 仍然由 latent up-projection 得到：
 
 $$
 k_{t,h}^{nope} = c_t^{KV} W_{UK,h}
@@ -381,7 +383,7 @@ $$
 v_{t,h} = c_t^{KV} W_{UV,h}
 $$
 
-RoPE 部分单独拆出来：
+RoPE key 则单独计算和缓存：
 
 $$
 k_t^R = \mathrm{RoPE}(x_t W_{KR})
@@ -399,17 +401,29 @@ $$
 s_{t,j,h} = q_{t,h}^{nope} \cdot k_{j,h}^{nope} + q_{t,h}^{R} \cdot k_j^R
 $$
 
-以 DeepSeek-V3/R1 类配置为例，公开 config 中 `n_heads=128`，`kv_lora_rank=512`，`qk_nope_head_dim=128`，`qk_rope_head_dim=64`，`v_head_dim=128`。因此每个 head 的 Q/K 维度可以看成 $`128`$ 维 non-RoPE 部分加 $`64`$ 维 RoPE 部分，V 维度是 $`128`$。decode cache 主要保存：
+这个拆分也是后面矩阵吸收能成立的前提：non-RoPE 部分可以走 latent 路径，RoPE 部分则保留独立的 key cache。
+
+#### KV Cache 容量对比
+
+现在再看 cache 规模就更清楚了：MLA 的 decode cache 不是 per-head K/V，而是低维 latent KV 加上单独的 RoPE key。设 RoPE key 维度为 $`d_R`$，全模型 decode cache 约为：
+
+$$
+\text{KVCache}_{MLA}
+\approx
+B \times S \times L \times (d_c + d_R) \times b
+$$
+
+也就是把标准 KV Cache 公式里的 $`2H_{kv}d`$ 换成 $`d_c+d_R`$。这里没有前面的 2，是因为 $`c^{KV}`$ 同时承担 non-RoPE K 和 V 的压缩缓存，RoPE key 则单独保存。
+
+以 DeepSeek-V3/R1 类配置为例，`n_heads=128`，`kv_lora_rank=512`，`v_head_dim=128`，`qk_rope_head_dim=64`。如果按 per-head 形式保存 value，仅 V 的维度就是 $`128 \times 128 = 16384`$；non-RoPE key 也有同量级的 per-head 展开开销。MLA 的 decode cache 主要保存：
 
 $$
 c_t^{KV} \in \mathbb{R}^{512}, \quad k_t^R \in \mathbb{R}^{64}
 $$
 
-RoPE key 单独缓存是关键细节：RoPE 带有位置相关旋转，如果混入 latent-up-projected key，会破坏 non-RoPE 部分的矩阵吸收。
-
 #### Decode 阶段的矩阵吸收
 
-decode 阶段通常是访存密集的：每一步只处理一个新 query，却要读取全部历史 K/V。矩阵吸收的目标是避免物化完整 MHA-style KV Cache，让多个 query heads 以 MQA-like 方式查询同一份 latent cache。
+只压缩 KV Cache 还不够。如果 decode 时每一步都把全部历史 $`c_j^{KV}`$ 展开成 per-head K/V，再做 attention，那么虽然 cache 存储变小了，但每步仍会产生大量历史 K/V 展开和读取。矩阵吸收的目标是避免物化完整 MHA-style KV Cache，让多个 query heads 直接查询同一份 latent cache。
 
 non-RoPE score 原本是：
 
@@ -459,16 +473,18 @@ $$
 
 因此，矩阵吸收的速度收益主要来自减少 HBM 读写：历史侧只保存和读取 latent KV，不展开、不写回 per-head K/V。
 
-#### 计算缓存分析
+#### Prefill 与 Decode 的计算路径
 
-只看 non-RoPE key score 路径，设：
+上面的矩阵吸收并不是在所有阶段都更划算。它减少了 decode 阶段的历史 K/V 展开和 HBM 读写，但也会把 score 的内积维度从 per-head non-RoPE 维度提高到 latent 维度。因此，MLA 通常在训练 / prefill 和 decode 中采用不同计算路径：prefill 更适合先展开 K/V 走 dense attention，decode 更适合矩阵吸收后直接查询 latent cache。
+
+下面只看 non-RoPE key score 路径，基于 DeepSeek-V3/R1 的配置比较这两种计算方式的 FLOPs：
 
 - $`s`$: 当前 query token 数，decode 中 $`s=1`$。
 - $`t`$: 被 attend 的历史 / 上下文 token 数。
-- $`d_c=512`$: latent KV 维度。
-- $`d_{nope}=128`$: 每个 head 的 non-RoPE key 维度。
+- $`d_c=512`$: `kv_lora_rank`，即 latent KV 维度。
+- $`d_{nope}=128`$: `qk_nope_head_dim`，即每个 head 的 non-RoPE key 维度。
 
-下面按矩阵乘的 **MACs** 比较两条路径；若按 $`1\text{ MAC}=2\text{ FLOPs}`$，FLOPs 需要乘以 2。这里省略 RoPE score、value aggregation、head 数和常数因子。
+这里省略 RoPE score、value aggregation、head 数和常数因子。
 
 **方式一：先展开 K，再做 MHA-like score**
 
@@ -476,12 +492,12 @@ $$
 \text{Score}=Q(C^{KV}W^{UK})^T
 $$
 
-核心 MACs 近似为：
+核心 FLOPs 近似为：
 
 $$
-t \cdot 512 \cdot 128 + s \cdot t \cdot 128
+2(t \cdot 512 \cdot 128 + s \cdot t \cdot 128)
 {}={}
-65536t + 128st
+131072t + 256st
 $$
 
 **方式二：矩阵吸收后直接和 latent 做 score**
@@ -490,18 +506,18 @@ $$
 \text{Score}=(Q(W^{UK})^T)(C^{KV})^T
 $$
 
-核心 MACs 近似为：
+核心 FLOPs 近似为：
 
 $$
-s \cdot 512 \cdot 128 + s \cdot t \cdot 512
+2(s \cdot 512 \cdot 128 + s \cdot t \cdot 512)
 {}={}
-65536s + 512st
+131072s + 1024st
 $$
 
 | 场景 | 设定 | 展开成 MHA-like | 矩阵吸收 |
 | --- | --- | ---: | ---: |
-| 训练 / prefill | $`s=t=163840`$ | 约 $`3.45`$ TMACs / $`6.89`$ TFLOPs | 约 $`13.75`$ TMACs / $`27.51`$ TFLOPs |
-| decode | $`s=1,t=163840`$ | 约 $`10758`$ MMACs / $`21517`$ MFLOPs | 约 $`84`$ MMACs / $`168`$ MFLOPs |
+| 训练 / prefill | $`s=t=163840`$ | 约 $`6.89`$ TFLOPs | 约 $`27.51`$ TFLOPs |
+| decode | $`s=1,t=163840`$ | 约 $`21517`$ MFLOPs | 约 $`168`$ MFLOPs |
 
 训练 / prefill 中 $`s,t`$ 都大，矩阵吸收会把 score 的内积维度从 $`128`$ 提到 $`512`$，因此更适合先展开 K/V，走 MHA-like dense attention。decode 中 $`s=1`$，不吸收则每步都要为 $`t`$ 个历史 token 展开 $`K=C^{KV}W^{UK}`$；吸收后只对当前 query 做一次 $`Q(W^{UK})^T`$，并且不用物化 per-head KV Cache。
 
@@ -510,12 +526,11 @@ $$
 <a id="long-context-attention-compression"></a>
 ## 5. 长上下文 Attention 压缩
 
-这部分讨论长上下文下的模型侧压缩。它包含两类不同但目标相近的做法：
+前面 MQA/GQA/MLA 主要压缩“每个历史 token 存什么”。但长上下文的另一个问题是：当前 query 是否真的需要访问所有历史 token。围绕这个问题，模型侧还有两条常见路线。
 
-- **连接稀疏化 / 序列压缩**：仍然保留 softmax attention，但减少每个 query 实际访问的历史 token/block。SWA 是固定窗口稀疏；NSA/DSA 是动态稀疏；DeepSeek-V4 进一步先做序列维度压缩，再做 sparse / compressed attention。
-- **记忆状态化**：不再显式保留所有历史 token 的 K/V，而是把历史信息写入固定或近似固定大小的 recurrent state。GatedDeltaNet 是这条路线的代表。
+第一类仍然保留 softmax attention，只是减少每个 query 实际访问的历史范围。SWA 用固定窗口限制局部上下文，NSA/DSA 动态选择重要 token 或 block，DeepSeek-V4 则先压缩序列长度，再在压缩后的表示上做 sparse / compressed attention。
 
-两者都面向长上下文效率，但压缩对象不同：前者压缩连接集合或序列长度，后者压缩历史记忆表示。
+第二类不再显式维护完整 token-level KV Cache，而是把历史信息写入固定或近似固定大小的 recurrent state。GatedDeltaNet 是这条路线的代表。前者压缩的是 attention 连接集合或序列长度，后者压缩的是历史记忆表示。
 
 <a id="swa"></a>
 ### 5.1 Sliding Window Attention (SWA)
@@ -557,12 +572,12 @@ SWA 的思路是牺牲每层的全局可见性，换取更低成本：
 #### 计算缓存分析
 
 
-SWA 在所有相关层都严格只看最近 $`W`$ 个 token，在推理系统实现了 rolling window KV Cache后，每一轮decode，会逐出一个 token的KV Cache，那么每层只需要保留最近窗口， 对应 layer 的 KV Cache 并不会随着上下文长度 $`S`$ 线性增长，而是固定在窗口大小 $`W`$ 上：
+SWA 在所有相关层都严格只看最近 $`W`$ 个 token，在推理系统实现 rolling window KV Cache 后，每一轮 decode 会逐出一个 token 的 KV Cache，那么每层只需要保留最近窗口。若所有 $`L`$ 层都采用同一窗口，KV Cache 不再随上下文长度 $`S`$ 线性增长，而是固定在窗口大小 $`W`$ 上：
 
 $$
 \text{KVCache}_{SWA}
-\propto
-2 \times B \times W \times H_{kv} \times d
+\approx
+2 \times B \times W \times L \times H_{kv} \times d \times b
 $$
 
 相对 full attention 的 cache 比例约为：
@@ -1105,16 +1120,20 @@ GatedDeltaNet 的组合点正在这里：用 $`\alpha_t`$ 做 adaptive forgettin
 
 #### 计算缓存分析
 
-GDN 的 decode cache 不再是：
+GDN 的 decode cache 不再按 token-level KV Cache 随上下文增长：
 
 $$
-O(SH_{kv}d)
+\text{KVCache}_{softmax}
+\approx
+2 \times B \times S \times L \times H_{kv} \times d \times b
 $$
 
-而是每层每个 head 保存一个 recurrent state：
+而是每层每个 recurrent head 保存一个 state。若 recurrent heads 数量为 $`H`$，state 使用的数据类型大小为 $`b_s`$ bytes，cache 规模约为：
 
 $$
-O(H\cdot d_vd_k)
+\text{Cache}_{GDN}
+\approx
+B \times L \times H \times d_v \times d_k \times b_s
 $$
 
 单步 decode 主要是 state update 和 state readout：
