@@ -3,35 +3,36 @@
 <a id="toc"></a>
 ## 目录
 
-1. [引言：为什么 Attention 是 LLM 的瓶颈](#intro)
-2. [Scaled Dot-Product / Causal Attention](#scaled-dot-product-attention)
-   - [Scaled Dot-Product Attention](#scaled-dot-product-formula)
-   - [Multi-Head Attention (MHA)](#mha)
-   - [Causal Attention 与 KV Cache](#causal-attention-kv-cache)
-   - [Prefill vs Decode](#prefill-vs-decode)
-3. [Head/KV 表示压缩](#kv-compression)
-   - [Multi-Query Attention (MQA)](#mqa)
-   - [Grouped-Query Attention (GQA)](#gqa)
-   - [Multi-Head Latent Attention (MLA)](#mla)
-4. [长上下文 Attention 压缩](#long-context-attention-compression)
-   - [Sliding Window Attention (SWA)](#swa)
-   - [Native Sparse Attention (NSA)](#nsa)
-   - [DeepSeek Sparse Attention (DSA)](#dsa)
-   - [DeepSeek-V4 Hybrid Attention](#deepseek-v4-hybrid)
-   - [Gated DeltaNet (GDN)](#linear-attention-gdn)
-5. [典型 LLM 的 Attention 选型](#llm-attention-choices)
-   - [模型速览](#llm-attention-table)
-   - [几个趋势](#llm-attention-trends)
-6. [Kernel / 系统优化](#kernel-system-optimization)
-   - [FlashAttention](#flashattention)
-   - [FlexAttention](#flexattention)
-   - [PagedAttention](#pagedattention)
-   - [RadixAttention](#radixattention)
-   - [Ring Attention](#ring-attention)
-7. [References](#references)
+- [1. 引言：为什么 Attention 是 LLM 的瓶颈](#intro)
+- [2. Scaled Dot-Product Attention](#scaled-dot-product-attention)
+  - [2.1 Scaled Dot-Product Attention](#scaled-dot-product-formula)
+  - [2.2 Multi-Head Attention (MHA)](#mha)
+- [3. KVCache](#kvcache)
+  - [3.1 Causal Attention 与 KV Cache](#causal-attention-kv-cache)
+  - [3.2 Prefill vs Decode](#prefill-vs-decode)
+- [4. Head/KV 表示压缩](#kv-compression)
+  - [4.1 Multi-Query Attention (MQA)](#mqa)
+  - [4.2 Grouped-Query Attention (GQA)](#gqa)
+  - [4.3 Multi-Head Latent Attention (MLA)](#mla)
+- [5. 长上下文 Attention 压缩](#long-context-attention-compression)
+  - [5.1 Sliding Window Attention (SWA)](#swa)
+  - [5.2 Native Sparse Attention (NSA)](#nsa)
+  - [5.3 DeepSeek Sparse Attention (DSA)](#dsa)
+  - [5.4 DeepSeek-V4 Hybrid Attention](#deepseek-v4-hybrid)
+  - [5.5 Gated DeltaNet (GDN)](#linear-attention-gdn)
+- [6. 典型 LLM 的 Attention 选型](#llm-attention-choices)
+  - [6.1 模型速览](#llm-attention-table)
+  - [6.2 几个趋势](#llm-attention-trends)
+- [7. Kernel / 系统优化](#kernel-system-optimization)
+  - [7.1 FlashAttention](#flashattention)
+  - [7.2 PagedAttention](#pagedattention)
+  - [7.3 RadixAttention](#radixattention)
+  - [7.4 Ring Attention](#ring-attention)
+  - [7.5 FlexAttention](#flexattention)
+- [8. References](#references)
 
 <a id="intro"></a>
-## 引言：为什么 Attention 是 LLM 的瓶颈
+## 1. 引言：为什么 Attention 是 LLM 的瓶颈
 
 当前主流 LLM 仍然以 Decoder-only Transformer 为基本骨架。Attention Layer 是这个骨架里最特殊的一层：Embedding、LayerNorm、MLP、LM Head 基本都是 token-wise 的线性/非线性变换，而 Attention 会显式地把当前 token 和历史 token 建立连接。
 
@@ -53,10 +54,10 @@
 - $`d`$: head dim，通常 $`D = H_q d`$
 
 <a id="scaled-dot-product-attention"></a>
-## Scaled Dot-Product / Causal Attention
+## 2. Scaled Dot-Product Attention
 
 <a id="scaled-dot-product-formula"></a>
-### Scaled Dot-Product Attention
+### 2.1 Scaled Dot-Product Attention
 
 标准 Attention 的输入是 Query、Key、Value：
 
@@ -81,7 +82,7 @@ $$
 *图片来源：[Attention Is All You Need, Figure 2](https://arxiv.org/abs/1706.03762)*
 
 <a id="mha"></a>
-### Multi-Head Attention (MHA)
+### 2.2 Multi-Head Attention (MHA)
 
 MHA 是 Transformer 原始论文中的标准形式。它把 hidden state 切分为多个 head，每个 head 独立做 Attention，最后 concat 后经过输出投影：
 
@@ -131,8 +132,15 @@ $$
 
 如果模型有 $`L`$ 层，还要再乘以 $`L`$。这也是为什么大模型服务中，长上下文和大 batch 往往首先撞到 KV Cache 显存瓶颈，而不是权重显存瓶颈。
 
+<a id="kvcache"></a>
+## 3. KVCache
+
+KVCache 是 Decoder-only LLM 推理中最核心的机制之一。它利用 causal mask 下“历史 token 的输出不会被未来 token 改变”这一性质，把逐 token decode 从反复重算完整上下文，变成只计算当前 token 并复用历史 K/V。这个机制大幅降低了重复计算，但也让长上下文推理越来越受 KV Cache 容量和 HBM 读取带宽限制。
+
+理解 KVCache 之后，后面的 MQA/GQA/MLA、SWA/NSA/DSA、PagedAttention/RadixAttention 才更容易串起来：它们本质上都在回答如何更少地保存、读取、组织或复用历史 KV。
+
 <a id="causal-attention-kv-cache"></a>
-### Causal Attention 与 KV Cache
+### 3.1 Causal Attention 与 KV Cache
 
 Decoder-only LLM 的推理是自回归生成：每一步把新 token append 到已有序列末尾，再预测下一个 token。
 
@@ -156,6 +164,26 @@ A_{\text{new}\to\text{hist}} & A_{\text{new}\to\text{new}}
 $$
 
 右上角为 0，表示历史 token 不能 attend 到新增 token。因此第 $`t`$ 步只有最后一行/最后一个 token 的 attention output 是新计算出来的；历史部分只是沿用上一轮结果。
+
+更具体地看历史部分的输出。Attention output 是 $`O = A V`$，其中 $`V`$ 也可以按历史 token / 新 token 分块, 因此第 $`t`$ 步历史 token 对应的输出为：
+
+$$
+O_{\text{hist}}^{(t)}
+=
+\begin{bmatrix}
+A_{\text{hist}\to\text{hist}} & 0
+\end{bmatrix}
+\begin{bmatrix}
+V_{\text{hist}} \\
+V_{\text{new}}
+\end{bmatrix}
+=
+A_{\text{hist}\to\text{hist}}V_{\text{hist}}
+=
+O_{\text{hist}}^{(t-1)}
+$$
+
+因为 causal mask 让 $`A_{\text{hist}\to\text{new}} = 0`$。 新增 token 只会产生新的 attention output 行，不会改变已经算过的 $`O_{\text{hist}}`$。
 
 ![attention-output](resources/attention-output.png)
 
@@ -186,7 +214,7 @@ $$
 前面的 2 分别对应 K 和 V。后续 MQA/GQA/MLA 的核心目标之一，就是降低这个式子里的 $`H_{kv}`$ 或把 $`H_{kv}d`$ 压缩成更小的 latent 维度。
 
 <a id="prefill-vs-decode"></a>
-### Prefill 与 Decode
+### 3.2 Prefill 与 Decode
 
 KV Cache 也解释了 LLM 推理中 Prefill 和 Decode 的区别。
 
@@ -204,12 +232,12 @@ KV Cache 也解释了 LLM 推理中 Prefill 和 Decode 的区别。
 FlashAttention、FlexAttention、PagedAttention、RadixAttention、Ring Attention 等则属于另一类问题：它们不直接改变 attention 的数学语义，而是优化 exact attention 的 kernel IO、可编程 kernel 生成、KV Cache 管理、prefix cache 复用或分布式执行，本文最后单独放在 Kernel / 系统优化里讨论。
 
 <a id="kv-compression"></a>
-## Head/KV 表示压缩
+## 4. Head/KV 表示压缩
 
 本节以 MHA 为 baseline，讨论如何在不改变 causal attention 基本连接关系的前提下，压缩历史 K/V 的 head 数量或缓存表示，从而降低 decode 阶段 KV Cache 的容量和 HBM 读取。
 
 <a id="mqa"></a>
-### Multi-Query Attention (MQA)
+### 4.1 Multi-Query Attention (MQA)
 
 MQA 的核心变化是：保留多个 Query heads，但所有 Query heads 共享同一组 K/V。
 
@@ -273,7 +301,7 @@ $$
 因此，MQA 是一个非常激进的推理优化：吞吐收益大，但质量风险也更高。
 
 <a id="gqa"></a>
-### Grouped-Query Attention (GQA)
+### 4.2 Grouped-Query Attention (GQA)
 
 GQA 是 MHA 和 MQA 之间的折中。它把 $`H_q`$ 个 query heads 分成 $`H_{kv}`$ 组，每组 query heads 共享一组 K/V。
 
@@ -323,7 +351,7 @@ $$
 这也是为什么 Llama、Mistral、Qwen、Gemma 等大量现代 LLM 都采用 GQA：它不是最省的方案，但通常是质量和 serving 成本之间最稳健的折中。
 
 <a id="mla"></a>
-### Multi-Head Latent Attention (MLA)
+### 4.3 Multi-Head Latent Attention (MLA)
 
 MLA 是 DeepSeek-V2 引入的 attention 结构。它不是继续减少 KV heads，而是改变 K/V 的缓存表示：**保留多 query heads，但把历史 K/V cache 从 per-head K/V 改成 latent KV + RoPE key**。
 
@@ -480,7 +508,7 @@ $$
 因此，MLA 的关键是双模：训练 / prefill 侧保留 MHA-like 高吞吐计算；decode 侧使用 MQA-like latent-cache 计算，减少长上下文下的 KV Cache 访存和显存压力。
 
 <a id="long-context-attention-compression"></a>
-## 长上下文 Attention 压缩
+## 5. 长上下文 Attention 压缩
 
 这部分讨论长上下文下的模型侧压缩。它包含两类不同但目标相近的做法：
 
@@ -490,7 +518,7 @@ $$
 两者都面向长上下文效率，但压缩对象不同：前者压缩连接集合或序列长度，后者压缩历史记忆表示。
 
 <a id="swa"></a>
-### Sliding Window Attention (SWA)
+### 5.1 Sliding Window Attention (SWA)
 
 标准 full attention 中，第 $`i`$ 个 token 可以 attend 到所有历史 token：
 
@@ -564,7 +592,7 @@ Mistral 7B 是 SWA + GQA 的代表模型之一。它用 SWA 降低长序列推�
 
 
 <a id="nsa"></a>
-### Native Sparse Attention (NSA)
+### 5.2 Native Sparse Attention (NSA)
 
 NSA 是 DeepSeek 在 2025 年提出的 **Natively trainable Sparse Attention**。它不是在 dense model 上做后处理式 token pruning，而是把 sparse pattern 作为模型结构的一部分，从预训练开始就参与 forward/backward，并配套硬件友好的 blockwise kernel。
 
@@ -710,7 +738,7 @@ decode 阶段更偏 memory-bound。Full attention 每步需要读取全部历史
 这里的重点和 MLA 类似：长上下文 decode 的瓶颈经常是 HBM 读取，而不是单纯 MACs。NSA 通过 blockwise sparse KV 读取和 shared KV fetching 降低等效访问 token 数，从而减少 memory access。
 
 <a id="dsa"></a>
-### DeepSeek Sparse Attention (DSA)
+### 5.3 DeepSeek Sparse Attention (DSA)
 
 DSA 是 DeepSeek-V3.2 引入的 sparse attention 机制。它和 NSA 一脉相承，但更具体地落在 DeepSeek-V3.2 的 MLA 架构上：用一个轻量 **lightning indexer** 为当前 query 选择少量历史 KV entries，然后只对这些 selected K/V 做 attention。
 
@@ -725,9 +753,9 @@ DeepSeek-V3.2 是从 DeepSeek-V3.1-Terminus 继续训练得到的。论文中明
 DSA 原型由两部分组成：
 
 1. **Lightning indexer**：计算 query token 和历史 token / KV entry 之间的 index score。
-2. **Fine-grained token selection**：根据 index score 选择 top-$`k`$ KV entries，再用这些 selected K/V 做主 attention。
+2. **Fine-grained token selection**：根据 index score 选择 top-$k$ KV entries，再用这些 selected K/V 做主 attention。
 
-论文中把第 $`t`$ 个 query token $`\mathbf{h}_t`$ 和第 $`s`$ 个历史 token $`\mathbf{h}_s`$ 的 index score 写成：
+论文中把第 $t$ 个 query token $\mathbf{h}_t$ 和第 $s$ 个历史 token $\mathbf{h}_s$ 的 index score 写成：
 
 $$
 I_{t,s}
@@ -737,9 +765,9 @@ w_{t,j}^{I}\cdot
 \text{ReLU}(\mathbf{q}_{t,j}^{I}\cdot \mathbf{k}_{s}^{I})
 $$
 
-其中 $`H^I`$ 是 indexer heads 数量，$`\mathbf{q}_{t,j}^{I}`$ 和 $`w_{t,j}^{I}`$ 来自当前 query token，$`\mathbf{k}_{s}^{I}`$ 来自历史 token。这里使用 ReLU 是为了吞吐；indexer head 数很少，并且可以用 FP8 实现，所以它比主 MLA attention 便宜很多。
+其中 $H^I$ 是 indexer heads 数量；$\mathbf{q}_{t,j}^{I}$ 和 $w_{t,j}^{I}$ 来自当前 query token，$\mathbf{k}_{s}^{I}$ 来自历史 token。这里使用 ReLU、较少 indexer heads 和 FP8，是为了让全历史打分足够便宜。
 
-有了 $`I_{t,s}`$ 之后，DSA 只取 top-$`k`$ 对应的 KV entries：
+有了 $I_{t,s}$ 之后，DSA 只取 top-$k$ 对应的 KV entries：
 
 $$
 \mathcal{S}_t
@@ -751,7 +779,7 @@ I_{t,s}\in \text{Top-k}(I_{t,:})
 \rbrace
 $$
 
-最终主 attention 仍然是 softmax attention，只是 K/V 集合从完整历史变成 selected set。由于 DSA 在 DeepSeek-V3.2 中基于 MLA 实例化，这里的 $`\mathbf{c}_s`$ 可以理解为 MLA 的 latent KV entry：
+最终主 attention 仍然是 softmax attention，只是 K/V 集合从完整历史变成 selected set。由于 DSA 在 DeepSeek-V3.2 中基于 MLA 实例化，这里的 $\mathbf{c}_s$ 可以理解为 MLA 的 latent KV entry：
 
 $$
 \mathbf{u}_t
@@ -767,7 +795,7 @@ s\in\mathcal{S}_t
 )
 $$
 
-在 DeepSeek-V3.2 中，DSA 是 **instantiated under MLA**。更具体地说，它基于 MLA 的 **MQA mode** 实现：每个 latent vector 作为 MLA 的 key-value entry，被当前 query token 的所有 query heads 共享。这样做是出于 kernel 效率考虑，因为每个 K/V entry 必须被多个 query 共享，避免不同 heads 选择不同 entry 后导致访存集合膨胀。
+在 DeepSeek-V3.2 中，DSA 是 **instantiated under MLA**，并基于 MLA 的 **MQA mode** 实现：每个 latent vector 作为 key-value entry，被当前 query token 的所有 query heads 共享。这样可以避免不同 heads 各自选择 top-k 后让实际读取集合膨胀。
 
 #### 设计动机
 
@@ -785,38 +813,35 @@ DSA 的思路是：不再让每个 query attend 到全部历史 latent KV，而�
 
 #### 计算缓存分析
 
-如果 full MLA attention 对每个 query 访问完整历史长度 $`S`$，主 attention 的复杂度可以粗略写成：
+设序列长度为 $L$，每个 query 选择 $k$ 个 KV entries。论文对 DSA 的核心复杂度描述是：main model 的 core attention 从 full attention 的 $O(L^2)$ 降到 $O(Lk)$。
 
-$$
-O(SH_qd)
-$$
+这里省略 head 数和 head dim 等常数项。重点是：每个 query 不再让主 attention 访问全部 $L$ 个历史 token，而是访问 $k$ 个 selected KV entries。论文中 sparse training stage 选择 $k=2048$。
 
-DSA 每个 query 只选择 $`K_s`$ 个 KV entries，主 attention 变成：
+但 DSA 不是把所有成本都变成 $O(Lk)$。Lightning indexer 仍然要做全历史打分，序列级复杂度仍有 $O(L^2)$ 项；decode 单步也要扫描历史 index keys。DSA 的关键是把昂贵的 full MLA attention 替换成“便宜的全历史 indexer + top-k 主 attention”。
 
-$$
-O(K_sH_qd)
-$$
+KV Cache 上，DSA 不会把 cache 长度压短：历史 token 的 MLA latent KV、RoPE 相关 key，以及 indexer 使用的轻量 key 仍需要按 token 保存。因此 cache 容量仍随上下文长度线性增长。它降低的是 decode 时主 attention 需要读取的重 KV 数量：先用轻量 indexer 找 top-k，再只 gather 选中的 latent KV 做主 attention。
 
-论文中 sparse training stage 选择的是 2048 个 key-value tokens。也就是说，在 128K context 下，主 attention 访问量可以从完整历史量级降到约 2K selected entries。
+训练上，DeepSeek-V3.2 也不是直接把 dense attention 切成 sparse attention，而是分两步：
 
-DSA 仍然有 indexer 开销。论文指出 indexer 复杂度仍随上下文增长，但因为 indexer head 数少、可用 FP8、计算远小于主 MLA attention，所以配合 optimized implementation 后，长上下文场景能获得显著 end-to-end speedup。
-
-训练上，DeepSeek-V3.2 不是直接把 dense attention 切成 sparse attention，而是分两步：
-
-1. **Dense warm-up**：保持 dense attention，只训练 lightning indexer。目标是让 indexer 分布对齐主 attention 分布；论文使用 1000 steps、总计约 2.1B tokens。
-2. **Sparse training**：启用 top-k token selection，主模型和 indexer 一起继续训练，让模型适应 sparse pattern；该阶段使用约 943.7B tokens。
+1. **Dense warm-up**：保持 dense attention，只训练 lightning indexer，让 indexer 分布对齐主 attention 分布。
+2. **Sparse training**：启用 top-k token selection，主模型和 indexer 一起继续训练，让模型适应 sparse pattern。
 
 这也是 DSA 能保持质量的关键：selection pattern 是训练出来的，而不是在推理阶段临时加一个 top-k mask。
 
 <a id="deepseek-v4-hybrid"></a>
-### DeepSeek-V4 Hybrid Attention (CSA + HCA)
+### 5.4 DeepSeek-V4 Hybrid Attention (CSA + HCA)
 
-DeepSeek-V4 在 V3.2 的 DSA 基础上进一步引入 **Hybrid Attention**，核心由两类 attention layer 交错组成：
+DeepSeek-V4 在 V3.2 的 DSA 基础上进一步引入新的 Hybrid Sparse Attention。DSA 已经把主 attention 从 full attention 变成 top-k sparse attention，但在 1M context 下仍然有两个问题：
 
-- **CSA (Compressed Sparse Attention)**：先压缩 KV Cache，再在压缩后的 KV 上做 DSA。
-- **HCA (Heavily Compressed Attention)**：使用更激进的 KV 压缩，但不做稀疏 top-k，而是在重压缩后的 KV 上做 dense attention。
+- DSA 相对于MLA并不减少需要存储的KV Cache，KV Cache 长度仍随上下文线性增长
+- indexer / top-k 的搜索空间也仍然很大， 需要跨越完整的历史上下文进行搜索。
 
-DeepSeek-V4-Pro 和 DeepSeek-V4-Flash 都支持 1M context。技术报告中给出的效率结论是：在 1M context 下，V4-Pro 的 single-token inference FLOPs 约为 V3.2 的 27%，KV Cache 约为 V3.2 的 10%；V4-Flash 进一步降到约 10% FLOPs 和 7% KV Cache。
+V4 的核心变化是先压缩序列维度，再在压缩后的 KV 上做 attention。它交错使用两类 layer：
+
+- **CSA (Compressed Sparse Attention)**：每 $m$ 个 token 压成一个 KV entry，再对 compressed KV 做 DSA top-k。
+- **HCA (Heavily Compressed Attention)**：每 $m'$ 个 token 压成一个 KV entry，不做 top-k，而是在重压缩后的 KV 上做 dense attention。
+
+DeepSeek-V4-Pro 和 DeepSeek-V4-Flash 都支持 1M context。技术报告给出的 1M context 口径是：V4-Pro 的 single-token inference FLOPs 约为 V3.2 的 27%，KV Cache 约为 V3.2 的 10%；V4-Flash 进一步降到约 10% FLOPs 和 7% KV Cache。
 
 #### CSA 的计算机制
 
@@ -828,12 +853,12 @@ $$
 
 ![deepseek-v4-csa](resources/attention-dpskv4-csa.png)
 
-*图片来源：[DeepSeek-V4 Technical Report, Figure 3](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)*
+*图片来源：[DeepSeek-V4 Technical Report, Figure 3](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf)*
 
-设原始 hidden states 为：
+设 hidden states 为：
 
 $$
-H \in \mathbb{R}^{S \times D}
+H \in \mathbb{R}^{n \times d}
 $$
 
 CSA 先生成两组 KV entries 和对应的压缩权重：
@@ -846,15 +871,7 @@ $$
 Z^a = HW_Z^a,\quad Z^b = HW_Z^b
 $$
 
-然后每 $`m`$ 个 token 压缩成一个 compressed KV entry。DeepSeek-V4 中 CSA 的压缩率为：
-
-$$
-m=4
-$$
-
-在 vLLM/SGLang 的实现讨论里，这一路通常也被称为 `c4a`：先把序列长度压到约 $`1/4`$，再对 compressed KV 做 sparse top-k attention。
-
-简化来看，压缩就是对一个局部 token group 做带可学习 positional bias 的 softmax weighted pooling：
+然后每 $m$ 个 token 压缩成一个 compressed KV entry。V4 中 CSA 的压缩率为 $m=4$。压缩本质上是对局部 token group 做带可学习 positional bias 的 softmax weighted pooling：
 
 $$
 C_i^{comp}
@@ -863,19 +880,21 @@ C_i^{comp}
 \text{softmax}(Z_j + B) \odot C_j
 $$
 
-技术报告中的 CSA 还使用了两路 $`C^a,C^b`$ 和 overlap compression：一个 compressed entry 会聚合当前 group 和前一个 group 的信息，使压缩后的 KV 既减少长度，又保留边界附近的上下文连续性。
+报告里的实际 CSA 使用两路 $C^a,C^b$ 和 overlap compression：每个 compressed entry 会聚合当前 group 与前一个 group 的信息。这样虽然每个 entry 来源于 $2m$ 个 KV entries，但整体序列长度仍压到约 $1/m$。
 
-得到 compressed KV 后，CSA 使用 lightning indexer 对压缩后的 KV blocks 打分，并选择 top-k compressed KV entries：
+得到 compressed KV 后，CSA 复用 DSA 思路，在 compressed KV 上做 sparse selection。它先用相同的压缩方式得到 compressed indexer keys $K^{IComp}$，再由当前 query 生成 indexer query：
 
 $$
-\mathcal{A}_{CSA}(t)
+c_t^Q
 {}={}
-\text{TopK}(
-I_{t,s}
-)
+h_t W_{DQ}
 $$
 
-其中 index score 可以抽象成多头 query 与 compressed indexer key 的打分：
+$$
+q_t^I = c_t^Q W_{UQ}^I
+$$
+
+index score 为：
 
 $$
 I_{t,s}
@@ -884,35 +903,47 @@ I_{t,s}
 \text{ReLU}(q_{t,h}^I \cdot K_s^{IComp})
 $$
 
-最终 core attention 不是 attend 到原始 $`S`$ 个 token，而是 attend 到 top-k 个 compressed KV：
+然后选择 top-k compressed KV entries：
+
+$$
+C_t^{sprs}
+{}={}
+\lbrace C_s^{comp}\mid I_{t,s}\in\text{Top-k}(I_{t,:})\rbrace
+$$
+
+最终 core attention 不是 attend 到原始 $n$ 个 token，而是 attend 到 top-k 个 compressed KV。并且 compressed KV 同时作为 key 和 value，因此是 shared key-value MQA：
 
 $$
 O_t^{CSA}
 {}={}
 \text{Attn}(
 q_t,
-C_{\mathcal{A}_{CSA}(t)}^{comp},
-C_{\mathcal{A}_{CSA}(t)}^{comp}
+C_t^{sprs},
+C_t^{sprs}
 )
 $$
 
-注意这里的 compressed KV 同时作为 key 和 value，因此 core attention 采用 shared key-value MQA 风格。
+V4-Pro 中 CSA 的 top-k 为 1024；V4-Flash 中为 512。两者的 CSA 压缩率都是 $m=4$。
 
 #### HCA 的计算机制
 
-HCA 的目标是提供更便宜的全局信号。它也做 KV compression，但压缩率更大：
+HCA 可以理解成：
+
+$$
+\text{HCA} = \text{Heavy Compression} + \text{Dense Attention over compressed KV} + \text{local SWA branch}
+$$
+
+![deepseek-v4-hca](resources/attention-dpskv4-hca.png)
+
+*图片来源：[DeepSeek-V4 Technical Report, Figure 4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf)*
+
+HCA 和 CSA 的压缩形式相似，但压缩率更大，且不做 overlap compression。V4 中：
 
 $$
 m'=128
 $$
 
-![deepseek-v4-hca](resources/attention-dpskv4-hca.png)
-
-*图片来源：[DeepSeek-V4 Technical Report, Figure 4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)*
-
-对应实现里常称为 `c128a`：把远距离上下文压到约 $`1/128`$ 后，对 compressed KV 做 dense attention。
-
-每 $`m'`$ 个 token 被压成一个 compressed KV entry：
+每 $m'$ 个 token 被压成一个 compressed KV entry：
 
 $$
 C_i^{comp}
@@ -921,7 +952,7 @@ C_i^{comp}
 \text{softmax}(Z_j + B) \odot C_j
 $$
 
-和 CSA 不同，HCA 不做 DSA top-k。它直接在重压缩后的 KV 上做 dense core attention：
+和 CSA 不同，HCA 不做 DSA top-k。因为序列长度已经压到约 $n/128$，它直接在重压缩后的 KV 上做 dense MQA：
 
 $$
 O_t^{HCA}
@@ -929,13 +960,13 @@ O_t^{HCA}
 \text{Attn}(q_t,C^{comp},C^{comp})
 $$
 
-因为序列长度已经从 $`S`$ 压到约 $`S/128`$，dense attention 的成本可以接受。HCA 的作用不是精确选择少量重要 block，而是用很低成本提供全局摘要信号。
+HCA 的作用不是精确选择少量重要 block，而是用很低成本提供全局摘要信号。V4-Pro 的前两层使用 HCA，后续层交错使用 CSA/HCA；V4-Flash 的前两层是 pure SWA，后续层交错使用 CSA/HCA。
 
 #### 为什么还需要 local SWA branch
 
-CSA 和 HCA 都会把多个 token 压成一个 KV entry。压缩带来的问题是：query 可能无法看到自己所在压缩 block 内尚未形成 compressed entry 的细粒度 token；而语言模型对最近 token 的依赖又非常强。
+CSA 和 HCA 都只允许 query attend 到之前的 compressed blocks。为了严格保持 causal，一个 query 不能看到自己所在压缩 block 内的其它 token；但语言模型对最近 token 的依赖又很强。
 
-因此 DeepSeek-V4 在 CSA/HCA 的 core attention 之外，额外加入一个未压缩的 sliding window KV branch：
+因此 V4 在 CSA/HCA 的 compressed core attention 外，额外加入一个未压缩的 sliding window branch。每个 query 还会 attend 到最近 $n_{win}$ 个原始 KV entries：
 
 $$
 O_t^{local}
@@ -943,58 +974,43 @@ O_t^{local}
 \text{Attn}(q_t,K_{t-n_{win}:t},V_{t-n_{win}:t})
 $$
 
-技术报告中的窗口大小为：
-
-$$
-n_{win}=128
-$$
-
-所以 V4 的 attention 不是“只看压缩后的历史”，而是：
+技术报告中的窗口大小为 $n_{win}=128$。因此 V4 的 attention 不是“只看压缩后的历史”，而是：
 
 - 远距离上下文通过 CSA/HCA 的 compressed KV 进入模型。
 - 最近上下文通过 uncompressed SWA branch 保留细粒度信息。
 
-#### Query 压缩、RoPE 与 Attention Sink
+#### 计算缓存分析
 
-DeepSeek-V4 的 CSA/HCA 还包含几个重要细节：
-
-- **低秩 query 生成**：先把 query hidden state 下投影成 latent query $`c_t^Q`$，再上投影出多头 query。CSA 中 indexer query 和 core attention query 共享这个 latent query。
-- **Q/KV RMSNorm**：core attention 前对每个 query head 和唯一 compressed KV head 做 RMSNorm，控制 attention logits 尺度。
-- **Partial RoPE**：对 query、compressed KV、core attention output 的最后 64 维应用 RoPE。由于 compressed KV 同时作为 key 和 value，attention output 会携带绝对位置信息，V4 再对 output 的 RoPE 维度施加负位置 RoPE，使输出保留相对位置信息。
-- **Attention Sink**：每个 head 有可学习 sink logit，加入 softmax denominator，使某个 query head 可以把总 attention mass 调低，甚至接近 0。这对噪声上下文或无关 compressed blocks 更稳健。
-
-#### 为何如此设计
-
-V3.2 的 DSA 已经降低了 attention computation，但在 1M context 下，只做 sparse selection 仍然不够：KV Cache 仍随上下文长度线性增长，top-k 的搜索空间也很大。
-
-DeepSeek-V4 的关键变化是把“稀疏选择”放到“序列压缩”之后：
+DeepSeek-V4 的关键是把长上下文 attention 的两个维度一起压缩：
 
 $$
-S
-\xrightarrow[]{\text{compress}}
-\frac{S}{m}
+n
+\xrightarrow[]{\text{CSA}}
+\frac{n}{m}
 \xrightarrow[]{\text{top-k}}
-K_s
+k
 $$
 
-这比直接在原始 token 上做 DSA 更适合 1M context：
+以及：
 
-- KV Cache 的有效长度先缩短。
-- lightning indexer 的搜索空间变小。
-- sparse attention 的 gather 范围变小。
-- HCA 用 $`S/128`$ 的 dense compressed attention 补充全局摘要。
-- local SWA branch 弥补压缩导致的局部细节损失。
+$$
+n
+\xrightarrow[]{\text{HCA}}
+\frac{n}{m'}
+$$
 
-#### 工程分析
+CSA 先把 KV Cache 长度压到 $1/4$，再做 top-k sparse attention；HCA 把 KV Cache 长度压到 $1/128$，因此 dense attention 也能接受。相比 V3.2 直接在原始 token 级 latent KV 上做 sparse selection，V4 同时缩小了 KV Cache 长度、indexer 搜索空间和主 attention 读取集合。
 
-DeepSeek-V4 的 attention 是典型的模型-系统共同设计：
+KV Cache 侧也不再是普通 `[token, head, dim]` 布局。报告中把 V4 的 cache 分成两类：
 
-- KV Cache 不再是所有层同构的 `[token, head, dim]`，而是同时包含 CSA compressed KV、HCA compressed KV、SWA state cache、uncompressed tail tokens、indexer cache。
-- PagedAttention 的简单假设被打破，需要为不同 layer 和不同 cache policy 设计 heterogeneous KV cache layout。
-- 低精度存储是机制的一部分：技术报告中 RoPE 维度使用 BF16，其他 KV 维度使用 FP8，lightning indexer attention 使用 FP4。
-- kernel 需要同时处理 compressed attention、SWA branch、top-k sparse selection、grouped output projection 等路径。
+- **classical KV cache**：保存 CSA/HCA 已经压缩完成的 KV entries，包括 CSA main KV、CSA indexer KV 和 HCA KV。
+- **state cache**：保存 SWA 最近窗口，以及 CSA/HCA 中还没凑满一个 compression block 的 uncompressed tail states。
 
-因此，DeepSeek-V4 的 Attention 机制不是单纯的 DSA，也不是 MLA 的小改版，而是：
+这也是为什么 V4 需要专门的 heterogeneous KV cache layout：CSA/HCA 的压缩率不同，SWA 有独立 eviction policy，未压缩 tail tokens 还要等凑满 $m$ 或 $m'$ 后才能写入 compressed cache。传统 PagedAttention 假设各层 cache shape 和 policy 更统一，在这里不够直接。
+
+低精度也是 V4 attention 成本的一部分：报告中 RoPE 维度使用 BF16，其余 KV 维度使用 FP8，lightning indexer attention 使用 FP4。以 BF16 GQA8、head dim 128 为 baseline，报告称 V4 在 1M context 下 KV Cache 可降到约 2%。
+
+因此，DeepSeek-V4 Hybrid Attention 可以概括为：
 
 $$
 \text{DeepSeek-V4 Attention}
@@ -1005,14 +1021,10 @@ $$
 + \text{compressed KV cache}
 $$
 
-从演进关系看，可以这样理解：
-
-- V2/V3: 主要靠 MLA 压缩 KV 表示维度。
-- V3.2: 引入 DSA，减少 long-context attention 的有效连接数。
-- V4: 在 DSA 前加入序列维度压缩，并用 CSA/HCA hybrid pattern 同时控制 KV Cache 和 attention FLOPs。
+它不是单纯减少 head 数，也不是只做 sparse attention，而是把 **KV 表示压缩、序列长度压缩、动态稀疏选择、局部未压缩窗口和低精度 cache** 合在一起，专门面向 1M context 下的 decode 访存和 attention FLOPs。
 
 <a id="linear-attention-gdn"></a>
-### Gated DeltaNet (GDN)
+### 5.5 Gated DeltaNet (GDN)
 
 GatedDeltaNet 不是 sparse attention，也不是 MHA/GQA/MLA 这类 head layout 变体，而是 linear attention / recurrent sequence model 方向的替代结构。
 
@@ -1129,14 +1141,14 @@ $$
 它的局限也来自同一个设计：固定大小 state 仍然可能发生 memory collision，不能无损替代 exact softmax attention；训练和推理也依赖专门的 linear/recurrent kernel。Qwen3-Next、Qwen3.5、Kimi Linear 这类模型采用的 3:1 linear/recurrent + softmax/MLA hybrid pattern，本质上就是在用 GDN 承担长期压缩记忆，用少量 softmax attention 层补足精确检索能力。
 
 <a id="llm-attention-choices"></a>
-## 典型 LLM 的 Attention 选型
+## 6. 典型 LLM 的 Attention 选型
 
 前面几节分别讨论了 Head/KV 表示压缩和长上下文 Attention 压缩两类模型侧路线。放回真实 LLM 架构里，这些机制通常不是单独出现，而是和 MoE、局部窗口、少量 full attention 层、推理系统 cache 管理一起组合。
 
 下表主要参考 Sebastian Raschka 的 [The Big LLM Architecture Comparison](https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison)（最后更新于 2026-04-02），并结合各模型官方发布页、模型卡和本文前面对 DeepSeek-V4 的整理。这里只关注 text LLM 的 attention 选择，不展开 MoE、Norm、Tokenizer、MTP 等其它结构差异；发布时间按首次公开发布或主要权重发布排序。
 
 <a id="llm-attention-table"></a>
-### 模型速览
+### 6.1 模型速览
 
 | 发布时间 | 模型 / 系列 | Attention 选型 | 对应本文路线 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -1163,7 +1175,7 @@ $$
 | 2026-04-24 | DeepSeek-V4 | CSA + HCA hybrid attention | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 在本文前面单独展开：先做序列压缩，再做 hybrid sparse/full/local 组合。 |
 
 <a id="llm-attention-trends"></a>
-### 几个趋势
+### 6.2 几个趋势
 
 从 2026-05 的视角看，这些模型体现出几个趋势：
 
@@ -1176,12 +1188,12 @@ $$
 下面再看另一类问题：当模型侧 attention 语义确定后，推理和训练系统如何把同样的 attention 算得更快、缓存得更省、并在多请求或多设备场景下更容易调度。
 
 <a id="kernel-system-optimization"></a>
-## Kernel / 系统优化
+## 7. Kernel / 系统优化
 
 下面这些技术经常和 attention 机制一起讨论，但它们并不直接改变模型的 attention 连接结构或 K/V 表示。它们更偏向 kernel、KV Cache 管理、prefix cache 复用、分布式执行或训练稳定性。
 
 <a id="flashattention"></a>
-### FlashAttention：Exact Attention 的 IO 优化手段
+### 7.1 FlashAttention：Exact Attention 的 IO 优化手段
 
 FlashAttention 经常和 Attention 机制放在一起讨论，但它本质上不是新的 Attention 机制，也不是新的模型结构。它不改变下面这个数学结果：
 
@@ -1287,8 +1299,128 @@ FA1 到 FA4 的变化不是“attention 数学越来越不同”，而是 **同�
 
 FlashAttention 与 MHA/MQA/GQA/MLA/SWA 的关系是：它可以作为这些 attention 语义的高性能 kernel 实现。比如 GQA 改变 K/V heads 的数量，FlashAttention 改变这些张量在 GPU 上如何被读取和计算。
 
+<a id="pagedattention"></a>
+### 7.2 PagedAttention
+
+PagedAttention 是 vLLM 提出的 KV Cache 管理机制。它不改变 attention 公式，也不减少模型逻辑上需要访问的历史 K/V；它解决的是服务系统里的 **KV Cache 分配、碎片和共享** 问题。
+
+普通推理服务如果为每个 request 分配一段连续 KV Cache，很容易遇到两个问题：
+
+- 不同 request 的 prompt / generation 长度不同，预留过多会浪费显存，预留过少又需要搬迁或重新分配。
+- continuous batching 中 request 动态进入和退出，连续内存布局容易产生碎片。
+
+PagedAttention 借鉴操作系统的 virtual memory / paging 思想，把每个 sequence 的逻辑 KV Cache 切成固定大小的 logical blocks，再映射到 GPU 上不连续的 physical blocks：
+
+$$
+\text{logical block id}
+\rightarrow
+\text{physical block id}
+$$
+
+attention kernel 不再假设某个 request 的 KV 是一整段连续内存，而是通过 block table 找到每个 token 对应的 physical KV block：
+
+```python
+for req in batch:
+    q = current_query(req)
+    blocks = block_table[req]          # logical -> physical blocks
+
+    for block_id in visible_blocks(req):
+        k_block, v_block = kv_pool[blocks[block_id]]
+        scores = q @ k_block.T
+        accumulate_attention(scores, v_block)
+```
+
+这个机制的关键是：**逻辑上连续，物理上分页**。一个 request append 新 token 时，只需要在最后一个 block 里继续写；当前 block 满了再申请新 physical block。request 结束后释放对应 block，其他 request 可以复用。
+
+PagedAttention 的收益主要来自系统层：
+
+- KV Cache 显存浪费接近一个 block 内的尾部碎片，而不是整段最大长度预留。
+- 动态 batching 更容易做，因为 request 的 KV 可以分散在不同 physical blocks。
+- beam search / parallel sampling / shared prefix 可以通过 block 级引用计数和 copy-on-write 共享前缀 KV。
+
+它的代价也在系统层：attention kernel 需要通过 block table 间接寻址，内存访问不再是一段简单连续数组；block size 也有取舍，太大会增加尾部浪费，太小会增加 block table 和调度开销。
+
+因此，PagedAttention 更准确地说是 **KV Cache virtual memory**，不是新的 attention 数学机制。它和 FlashAttention 可以组合：FlashAttention 负责 tile 内 exact attention 的 IO 优化，PagedAttention 负责 KV Cache 在显存中的组织和分配。
+
+<a id="radixattention"></a>
+### 7.3 RadixAttention
+
+RadixAttention 是 SGLang 提出的 prefix KV Cache 复用机制。它同样不改变 attention 的数学公式；它解决的是另一类服务端问题：多个请求经常共享相同前缀，例如 system prompt、few-shot examples、多轮对话历史、agent tree search 中的共同路径。如果每个请求都重新 prefill 这些共享前缀，就会重复计算并重复存储 KV Cache。
+
+RadixAttention 用 radix tree / compressed trie 管理所有已缓存的 token prefix。树上的边或节点保存一段 token 序列，value 保存对应 KV Cache 的位置：
+
+```text
+root
+  └── [system prompt]
+        ├── [user question A]
+        └── [user question B]
+```
+
+新请求到来时，系统先做 longest-prefix match：
+
+```python
+def run_request(tokens):
+    matched_kv, node = radix_cache.match_longest_prefix(tokens)
+    prefix_len = len(matched_kv)
+
+    # matched prefix already has KV cache
+    suffix = tokens[prefix_len:]
+    new_kv = prefill_only_suffix(suffix, prefix_kv=matched_kv)
+
+    output = decode_with_kv(matched_kv + new_kv)
+    radix_cache.insert(tokens, matched_kv + new_kv)
+    return output
+```
+
+如果命中共享前缀，prefill 只需要计算 suffix；decode 时 attention 仍然看完整上下文，只是前缀部分的 KV 已经复用。请求完成后，新的 token path 会插入 radix tree；如果一个新请求只匹配到某个节点中间，radix tree 会 split node，以便后续复用更细粒度的共享前缀。
+
+RadixAttention 的收益来自两个方面：
+
+- **减少 prefill compute**：命中的 prefix 不需要重新跑 Transformer。
+- **减少 KV Cache 存储**：共享 prefix 的 KV Cache 只存一份，通过引用计数保护，内存不足时按 LRU 等策略逐出。
+
+这和 PagedAttention 的关注点不同。PagedAttention 管的是“一个 sequence 的 KV Cache 如何分页放进显存”；RadixAttention 管的是“多个 sequence 之间相同 prefix 的 KV Cache 如何被发现和复用”。实际系统里两者可以叠加：Radix tree 的 value 可以指向分页 KV blocks，prefix matching 可以按 page 粒度对齐，底层 attention backend 仍然可以调用 FlashAttention / FlashInfer 这类 kernel。
+
+RadixAttention 最适合 shared-prefix workload：长 system prompt、retrieval-augmented QA、few-shot prompting、多轮 chat、tree-of-thought / agent 分支搜索。它不减少单个全新请求的 attention 计算；如果请求之间几乎没有共享前缀，收益也会明显下降。
+
+<a id="ring-attention"></a>
+### 7.4 Ring Attention
+
+Ring Attention 是长上下文训练中的分布式 exact attention 执行方式。它不改变 attention 公式，也不稀疏化连接；它解决的是单卡放不下长序列时，如何把 sequence 维度切到多张 GPU 上，并且让通信和计算重叠。
+
+假设把长度为 $`S`$ 的序列切到 $`P`$ 张 GPU 上，每张 GPU 持有一段本地 query block：
+
+$$
+Q^{(p)},K^{(p)},V^{(p)},\quad p=0,\ldots,P-1
+$$
+
+每张 GPU 要计算本地 query 对全局 K/V 的 attention。朴素做法需要 all-gather 全部 K/V，这会让每张卡重新持有完整序列，显存压力仍然很大。Ring Attention 的做法是让 K/V block 沿 ring 拓扑逐步传递：
+
+```python
+for step in range(num_devices):
+    # local GPU owns Q_local and one K/V block at a time
+    scores = Q_local @ K_block.T
+    update_online_softmax(scores, V_block)
+
+    # send current K/V block to next GPU, receive previous GPU's block
+    K_block, V_block = ring_send_recv(K_block, V_block)
+```
+
+每张 GPU 在任意时刻只需要保存本地 Q block、本地/当前传入的 K/V block，以及 online softmax accumulator。经过 $`P`$ 轮之后，本地 query 已经看过所有设备上的 K/V，得到的结果仍然等价于 full attention。
+
+它和 FlashAttention 的关系很紧：FlashAttention 是单卡或单设备内的 tile-level IO 优化；Ring Attention 是多设备 sequence parallel 的调度方式。实际实现中，Ring Attention 通常也会在每个本地 block 上使用 FlashAttention-like online softmax，并把下一块 K/V 的通信隐藏在当前 block 的 attention 计算后面。
+
+Ring Attention 的收益和代价都很明确：
+
+- 收益：单卡不需要保存完整序列的 K/V 和 attention 中间结果，context length 可以随设备数扩展。
+- 收益：保持 exact attention，不改变模型训练目标。
+- 代价：每层 attention 都需要环形通信，性能取决于 interconnect 带宽和通信计算重叠程度。
+- 代价：它主要解决训练 / long-context prefill 的分布式显存问题，不是单机 decode KV Cache 压缩机制。
+
+因此，Ring Attention 更准确地说是 **sequence parallel attention runtime**，而不是新的 Attention 结构。
+
 <a id="flexattention"></a>
-### FlexAttention
+### 7.5 FlexAttention
 
 FlexAttention 是 PyTorch 提供的可编程 attention kernel 接口，API 位于 `torch.nn.attention.flex_attention`。它不是新的 attention 数学机制，而是一个 **compiler-driven programming model**：用户用少量 Python 函数描述 attention score 如何修改、哪些位置需要参与计算，`torch.compile` 再把这些逻辑 lowering 成 fused attention kernel。
 
@@ -1393,129 +1525,9 @@ FlexAttention 适合：
 
 所以，FlexAttention 更准确地说是 **attention kernel programming interface**：它把 FlashAttention 的 IO-aware 执行思想扩展到“可组合 attention 变体”的场景。
 
-<a id="pagedattention"></a>
-### PagedAttention
-
-PagedAttention 是 vLLM 提出的 KV Cache 管理机制。它不改变 attention 公式，也不减少模型逻辑上需要访问的历史 K/V；它解决的是服务系统里的 **KV Cache 分配、碎片和共享** 问题。
-
-普通推理服务如果为每个 request 分配一段连续 KV Cache，很容易遇到两个问题：
-
-- 不同 request 的 prompt / generation 长度不同，预留过多会浪费显存，预留过少又需要搬迁或重新分配。
-- continuous batching 中 request 动态进入和退出，连续内存布局容易产生碎片。
-
-PagedAttention 借鉴操作系统的 virtual memory / paging 思想，把每个 sequence 的逻辑 KV Cache 切成固定大小的 logical blocks，再映射到 GPU 上不连续的 physical blocks：
-
-$$
-\text{logical block id}
-\rightarrow
-\text{physical block id}
-$$
-
-attention kernel 不再假设某个 request 的 KV 是一整段连续内存，而是通过 block table 找到每个 token 对应的 physical KV block：
-
-```python
-for req in batch:
-    q = current_query(req)
-    blocks = block_table[req]          # logical -> physical blocks
-
-    for block_id in visible_blocks(req):
-        k_block, v_block = kv_pool[blocks[block_id]]
-        scores = q @ k_block.T
-        accumulate_attention(scores, v_block)
-```
-
-这个机制的关键是：**逻辑上连续，物理上分页**。一个 request append 新 token 时，只需要在最后一个 block 里继续写；当前 block 满了再申请新 physical block。request 结束后释放对应 block，其他 request 可以复用。
-
-PagedAttention 的收益主要来自系统层：
-
-- KV Cache 显存浪费接近一个 block 内的尾部碎片，而不是整段最大长度预留。
-- 动态 batching 更容易做，因为 request 的 KV 可以分散在不同 physical blocks。
-- beam search / parallel sampling / shared prefix 可以通过 block 级引用计数和 copy-on-write 共享前缀 KV。
-
-它的代价也在系统层：attention kernel 需要通过 block table 间接寻址，内存访问不再是一段简单连续数组；block size 也有取舍，太大会增加尾部浪费，太小会增加 block table 和调度开销。
-
-因此，PagedAttention 更准确地说是 **KV Cache virtual memory**，不是新的 attention 数学机制。它和 FlashAttention 可以组合：FlashAttention 负责 tile 内 exact attention 的 IO 优化，PagedAttention 负责 KV Cache 在显存中的组织和分配。
-
-<a id="radixattention"></a>
-### RadixAttention
-
-RadixAttention 是 SGLang 提出的 prefix KV Cache 复用机制。它同样不改变 attention 的数学公式；它解决的是另一类服务端问题：多个请求经常共享相同前缀，例如 system prompt、few-shot examples、多轮对话历史、agent tree search 中的共同路径。如果每个请求都重新 prefill 这些共享前缀，就会重复计算并重复存储 KV Cache。
-
-RadixAttention 用 radix tree / compressed trie 管理所有已缓存的 token prefix。树上的边或节点保存一段 token 序列，value 保存对应 KV Cache 的位置：
-
-```text
-root
-  └── [system prompt]
-        ├── [user question A]
-        └── [user question B]
-```
-
-新请求到来时，系统先做 longest-prefix match：
-
-```python
-def run_request(tokens):
-    matched_kv, node = radix_cache.match_longest_prefix(tokens)
-    prefix_len = len(matched_kv)
-
-    # matched prefix already has KV cache
-    suffix = tokens[prefix_len:]
-    new_kv = prefill_only_suffix(suffix, prefix_kv=matched_kv)
-
-    output = decode_with_kv(matched_kv + new_kv)
-    radix_cache.insert(tokens, matched_kv + new_kv)
-    return output
-```
-
-如果命中共享前缀，prefill 只需要计算 suffix；decode 时 attention 仍然看完整上下文，只是前缀部分的 KV 已经复用。请求完成后，新的 token path 会插入 radix tree；如果一个新请求只匹配到某个节点中间，radix tree 会 split node，以便后续复用更细粒度的共享前缀。
-
-RadixAttention 的收益来自两个方面：
-
-- **减少 prefill compute**：命中的 prefix 不需要重新跑 Transformer。
-- **减少 KV Cache 存储**：共享 prefix 的 KV Cache 只存一份，通过引用计数保护，内存不足时按 LRU 等策略逐出。
-
-这和 PagedAttention 的关注点不同。PagedAttention 管的是“一个 sequence 的 KV Cache 如何分页放进显存”；RadixAttention 管的是“多个 sequence 之间相同 prefix 的 KV Cache 如何被发现和复用”。实际系统里两者可以叠加：Radix tree 的 value 可以指向分页 KV blocks，prefix matching 可以按 page 粒度对齐，底层 attention backend 仍然可以调用 FlashAttention / FlashInfer 这类 kernel。
-
-RadixAttention 最适合 shared-prefix workload：长 system prompt、retrieval-augmented QA、few-shot prompting、多轮 chat、tree-of-thought / agent 分支搜索。它不减少单个全新请求的 attention 计算；如果请求之间几乎没有共享前缀，收益也会明显下降。
-
-<a id="ring-attention"></a>
-### Ring Attention
-
-Ring Attention 是长上下文训练中的分布式 exact attention 执行方式。它不改变 attention 公式，也不稀疏化连接；它解决的是单卡放不下长序列时，如何把 sequence 维度切到多张 GPU 上，并且让通信和计算重叠。
-
-假设把长度为 $`S`$ 的序列切到 $`P`$ 张 GPU 上，每张 GPU 持有一段本地 query block：
-
-$$
-Q^{(p)},K^{(p)},V^{(p)},\quad p=0,\ldots,P-1
-$$
-
-每张 GPU 要计算本地 query 对全局 K/V 的 attention。朴素做法需要 all-gather 全部 K/V，这会让每张卡重新持有完整序列，显存压力仍然很大。Ring Attention 的做法是让 K/V block 沿 ring 拓扑逐步传递：
-
-```python
-for step in range(num_devices):
-    # local GPU owns Q_local and one K/V block at a time
-    scores = Q_local @ K_block.T
-    update_online_softmax(scores, V_block)
-
-    # send current K/V block to next GPU, receive previous GPU's block
-    K_block, V_block = ring_send_recv(K_block, V_block)
-```
-
-每张 GPU 在任意时刻只需要保存本地 Q block、本地/当前传入的 K/V block，以及 online softmax accumulator。经过 $`P`$ 轮之后，本地 query 已经看过所有设备上的 K/V，得到的结果仍然等价于 full attention。
-
-它和 FlashAttention 的关系很紧：FlashAttention 是单卡或单设备内的 tile-level IO 优化；Ring Attention 是多设备 sequence parallel 的调度方式。实际实现中，Ring Attention 通常也会在每个本地 block 上使用 FlashAttention-like online softmax，并把下一块 K/V 的通信隐藏在当前 block 的 attention 计算后面。
-
-Ring Attention 的收益和代价都很明确：
-
-- 收益：单卡不需要保存完整序列的 K/V 和 attention 中间结果，context length 可以随设备数扩展。
-- 收益：保持 exact attention，不改变模型训练目标。
-- 代价：每层 attention 都需要环形通信，性能取决于 interconnect 带宽和通信计算重叠程度。
-- 代价：它主要解决训练 / long-context prefill 的分布式显存问题，不是单机 decode KV Cache 压缩机制。
-
-因此，Ring Attention 更准确地说是 **sequence parallel attention runtime**，而不是新的 Attention 结构。
-
 
 <a id="references"></a>
-## References
+## 8. References
 
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
 - [The Big LLM Architecture Comparison](https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison)
@@ -1556,7 +1568,7 @@ Ring Attention 的收益和代价都很明确：
 - [Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention](https://arxiv.org/abs/2502.11089)
 - [DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models](https://arxiv.org/abs/2512.02556)
 - [DeepSeek-V3.2-Exp 发布，训练推理提效，API 同步降价](https://api-docs.deepseek.com/zh-cn/news/news250929)
-- [DeepSeek-V4 Technical Report](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/DeepSeek_V4.pdf)
+- [DeepSeek-V4 Technical Report](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf)
 - [DeepSeek V4 in vLLM: Efficient Long-context Attention](https://vllm.ai/blog/deepseek-v4)
 - [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464)
 - [DeltaNet Explained (Part I): The Model](https://sustcsonglin.github.io/blog/2024/deltanet-1/)
