@@ -1169,29 +1169,27 @@ $$
 <a id="llm-attention-table"></a>
 ### 6.1 模型速览
 
-| 发布时间 | 模型 / 系列 | Attention 选型 | 对应本文路线 | 备注 |
-| --- | --- | --- | --- | --- |
-| 2024-11-26 | OLMo 2 | MHA | Scaled Dot-Product / Causal Attention | 一个相对传统、透明的 baseline；后来 OLMo 2 32B variant 使用 GQA。 |
-| 2024-12-26 / 2025-01-20 | DeepSeek-V3 / R1 | MLA | Head/KV 表示压缩 | V3 首发 MLA 架构；R1 基于 V3 延续 MLA，进一步把 DeepSeek-style MLA 推到主流视野。 |
-| 2025-03-12 | Gemma 3 | GQA + SWA/full hybrid，约 5:1 | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 5 个 sliding-window local layer 后接 1 个 global/full attention layer；SWA window 从 Gemma 2 的 4096 降到 1024。 |
-| 2025-03-17 | Mistral Small 3.1 | GQA，默认不启用 SWA | Head/KV 表示压缩 | 相比早期 Mistral，Small 3.1 默认 `sliding_window=null`，更偏 regular GQA。 |
-| 2025-04-05 | Llama 4 | GQA | Head/KV 表示压缩 | 延续 Llama 系列常见的 GQA 路线。 |
-| 2025-04-29 | Qwen3 dense / MoE | GQA | Head/KV 表示压缩 | Raschka 文中也把 Qwen3 作为 GQA baseline 来对比 gpt-oss、Olmo 3、MiniMax-M2 等模型。 |
-| 2025-07 | Kimi K2 | MLA | Head/KV 表示压缩 | 架构接近 DeepSeek-V3，但调整了 MoE 与 MLA 规模；后续 K2 Thinking 延续 K2 系列路线。 |
-| 2025-08-05 | gpt-oss | GQA + SWA every other layer + attention sinks | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 与 Qwen3 都使用 GQA，但 gpt-oss 每隔一层限制上下文窗口，并加入 attention sink/bias 设计。 |
-| 2025-09-11 | Qwen3-Next | GatedDeltaNet + Gated Attention，约 3:1 | 长上下文 Attention 压缩 + 标准 attention hybrid | 用 3 个 GatedDeltaNet block 搭配 1 个 gated attention block，降低长上下文 memory 成本。 |
-| 2025-10-27 | MiniMax-M2 | GQA + full softmax attention | Head/KV 表示压缩 + 标准 full attention | MiniMax-M1 曾使用 lightning attention；M2 为了 reasoning 和 multi-turn 质量回到常规 softmax attention，`sliding_window=null`，同时配置为 48 query heads / 8 KV heads 的 GQA。 |
-| 2025-10-30 | Kimi Linear | GatedDeltaNet + MLA，约 3:1 | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 与 Qwen3-Next 相似，但 full attention 层用 MLA，而不是普通 gated attention。 |
-| 2025-11-20 | Olmo 3 7B / 32B | 7B: MHA + SWA；32B: GQA + SWA/global | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 7B 延续 MHA，但加入 SWA 缩小 KV Cache；32B 改用 GQA。 |
-| 2025-12-01 | DeepSeek-V3.2 | MLA + Sparse Attention / DSA | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 在 V3 的 MLA 基础上加入稀疏 attention，面向长上下文效率。 |
-| 2025-12-02 | Mistral 3 Large | DeepSeek-V3-like MLA | Head/KV 表示压缩 | Raschka 文中认为它几乎采用 DeepSeek-V3/V3.1 架构，只调整 expert 尺寸和数量。 |
-| 2025-12 | Xiaomi MiMo-V2-Flash | SWA/full hybrid，约 5:1，window 128 | 长上下文 Attention 压缩 | 使用比 Gemma 3 更激进的小窗口 SWA，被文中称为当时最大规模的 SWA 模型之一。 |
-| 2025-12 / 2026-03 | Nemotron 3 Nano / Super | Mamba-Transformer hybrid + 少量 GQA layers | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 大量层用 Mamba-2/state-space 风格模块，只在少数层保留 GQA；Super 是后续更大版本。 |
-| 2026-01-27 | Arcee Trinity Large | SWA/global 约 3:1 + gated attention | 长上下文 Attention 压缩 + gated attention | 类似 Gemma/Olmo/Xiaomi 的 local/global 交替，但比例为 3:1，窗口较大。 |
-| 2026-02 | Qwen3.5 | GatedDeltaNet + Softmax Attention，约 3:1 | 长上下文 Attention 压缩 + 标准 attention hybrid | Qwen 官方站点描述为 75% GatedDeltaNet + 25% Softmax Attention，面向 256K 到 1M+ 长上下文。 |
-| 2026-02-11 / 2026-02-12 | GLM-5 | MLA + DeepSeek Sparse Attention | Head/KV 表示压缩 + 长上下文 Attention 压缩 | Raschka 文中指出 GLM-5 采用 DeepSeek 的 MLA 与 sparse attention，以降低长上下文推理成本。 |
-| 2026-04-02 | Gemma 4 | GQA + SWA/full hybrid，约 5:1 | Head/KV 表示压缩 + 长上下文 Attention 压缩 | 结构基本延续 Gemma 3；global attention 层还引入 K/V 复用细节。 |
-| 2026-04-24 | DeepSeek-V4 | CSA + HCA hybrid attention | 长上下文 Attention 压缩 + Head/KV 表示压缩 | 在本文前面单独展开：先做序列压缩，再做 hybrid sparse/full/local 组合。 |
+| 发布月份 | 模型 / 系列 | Attention 选型 | 备注 |
+| --- | --- | --- | --- |
+| 2023-07 | Llama 2（7B / 13B） | MHA | 7B 为 32 Q heads / 32 KV heads，13B 为 40 Q heads / 40 KV heads；两者都是每个 query head 各自对应 KV head。 |
+| 2023-08 | Qwen-7B | MHA | 第一代 Qwen 文本模型基线；该版本配置里未显式拆分 KV heads，可视作标准 MHA。 |
+| 2023-09 | [Mistral 7B](https://mistral.ai/news/announcing-mistral-7b/) | GQA + SWA | 使用 GQA + SWA 用于降低长序列推理成本。 |
+| 2024-05 | DeepSeek-V2 | MLA | 由 DeepSeek 引入的新的Attention机制. |
+| 2024-12 / 2025-01 | DeepSeek-V3 / R1 | MLA | DeepSeek-V3 沿用并扩展 V2 的 MLA 路线；R1 基于 V3/R1 系列路线，使 MLA 更受关注。 |
+| 2025-03 | Gemma 3 | GQA + SWA/full hybrid，约 5:1 | 5 个 sliding-window local layer 后接 1 个 global/full attention layer；SWA window 从 Gemma 2 的 4096 降到 1024。 |
+| 2025-04 | Llama 4 | GQA | 使用 GQA，并混合 chunked/local 与 full attention 层。 |
+| 2025-04 | Qwen3 dense / MoE | GQA | 官方配置中 Q heads 与 KV heads 不同，符合 GQA；可作为现代 GQA baseline。 |
+| 2025-07 | Kimi K2 | MLA | 架构接近 DeepSeek-V3，但调整了 MoE 与 MLA 规模；后续 K2 Thinking 延续 K2 系列路线。 |
+| 2025-08 | gpt-oss | GQA + alternating dense/local attention + attention sinks | 使用 grouped multi-query attention，并交替 dense 与 locally banded sparse attention；还加入 attention sink/bias 设计。 |
+| 2025-09 | Qwen3-Next | GatedDeltaNet + Gated Attention，约 3:1 | 用 3 个 GatedDeltaNet block 搭配 1 个 gated attention block，降低长上下文 memory 成本；公开日期在不同发布源中略有差异。 |
+| 2025-10 | MiniMax-M2 | GQA + full softmax attention | MiniMax-M1 曾使用 lightning attention；M2 为了 reasoning 和 multi-turn 质量回到常规 softmax attention，`sliding_window=null`，同时配置为 48 query heads / 8 KV heads 的 GQA。 |
+| 2025-12 | DeepSeek-V3.2 | MLA + Sparse Attention / DSA | 在 V3 的 MLA 基础上加入稀疏 attention，面向长上下文效率。 |
+| 2025-12 | Mistral Large 3 / Large 3.0 | DeepSeek-V3-like MLA | 官方命名为 Mistral Large 3；“DeepSeek-V3-like MLA”主要来自第三方架构分析口径，官方材料更强调 sparse MoE 与开放权重。 |
+| 2025-12 | Xiaomi MiMo-V2-Flash | SWA/full hybrid，约 5:1，window 128 | 使用比 Gemma 3 更激进的小窗口 SWA，被文中称为当时最大规模的 SWA 模型之一。 |
+| 2026-02 | Qwen3.5 | GatedDeltaNet + Softmax Attention，约 3:1 | 同Qwen3-Next |
+| 2026-02 | GLM-5 | MLA + DeepSeek Sparse Attention | DeepSeekV3.2 Like的 ModelArchitecture |
+| 2026-04 | Gemma 4 | 大部分变体：GQA + SWA/full hybrid，约 5:1；E2B：MQA + 4:1 | 不能把整个 Gemma 4 系列都概括为同一种 attention 配置；较大变体基本延续 Gemma 3 路线，E2B 是例外。 |
+| 2026-04 | DeepSeek-V4 | CSA + HCA hybrid attention | 替代 V3/V3.2 的 MLA 路线，改为 hybrid local/long-range attention；本文前面单独展开 CSA/HCA。 |
 
 <a id="llm-attention-trends"></a>
 ### 6.2 几个趋势
