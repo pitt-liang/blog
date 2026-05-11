@@ -757,10 +757,12 @@ $$
 GatedDeltaNet 则把历史信息写入一个矩阵状态：
 
 $$
-S_t\in\mathbb{R}^{d_v\times d_k}
+S_t\in\mathbb{R}^{d_k\times d_v}
 $$
 
 每一步只保留和更新这个 state，而不是为每个历史 token 保存 K/V。因此它更接近“可训练的快速权重 / associative memory”，而不是从历史 token 列表中显式检索。
+
+它的设计目标是补上 vanilla linear attention 的两个短板：历史信息盲目累加容易 memory overload，且缺少对特定 key-value association 的定向更新。GDN 用 $`\alpha_t`$ 做 adaptive forgetting，用 $`\beta_t`$ 和 delta rule 做 targeted update，牺牲 softmax attention 的显式全历史检索，换取固定 state 形式的长上下文效率。
 
 ![gated-deltanet-linear-attention](resources/attention-linear-gdn.png)
 
@@ -773,15 +775,15 @@ $$
 $$
 o_t
 {}={}
-\sum_{i=1}^{t} v_i(k_i^Tq_t)
+\sum_{i=1}^{t} (q_tk_i^T)v_i
 {}={}
-\bigl(\sum_{i=1}^{t} v_i k_i^T\bigr)q_t
+q_t\bigl(\sum_{i=1}^{t} k_i^Tv_i\bigr)
 $$
 
 定义：
 
 $$
-S_t=S_{t-1}+v_tk_t^T,\qquad o_t=S_tq_t
+S_t=S_{t-1}+k_t^Tv_t,\qquad o_t=q_tS_t
 $$
 
 问题是，所有 key-value association 都被累加到同一个矩阵里，序列变长后容易产生 memory collision。DeltaNet 的改进是用 delta rule 对当前 key 对应的旧 value 做“擦除 + 写入”：
@@ -789,39 +791,26 @@ $$
 $$
 S_t
 {}={}
-S_{t-1}(I-\beta_t k_tk_t^T)
+\bigl(I-\beta_t k_t^Tk_t\bigr)S_{t-1}
 +
-\beta_t v_tk_t^T
+\beta_t k_t^Tv_t
 $$
 
-其中 $`\beta_t`$ 是 writing strength，$`S_{t-1}k_t`$ 可以理解为当前 state 中和 $`k_t`$ 关联的旧 value。Delta rule 先减掉旧关联，再写入新的 $`v_t`$，因此比 vanilla linear attention 的盲目累加更适合 associative recall。
+其中 $`\beta_t`$ 是 writing strength，$`k_tS_{t-1}`$ 可以理解为当前 state 中和 $`k_t`$ 关联的旧 value。Delta rule 先减掉旧关联，再写入新的 $`v_t`$，因此比 vanilla linear attention 的盲目累加更适合 associative recall。
 
 GatedDeltaNet 在 delta rule 外再加一个 data-dependent decay gate：
 
 $$
 S_t
 {}={}
-S_{t-1}
-(
-\alpha_t(I-\beta_t k_tk_t^T)
-)
+\alpha_t\bigl(I-\beta_t k_t^Tk_t\bigr)S_{t-1}
 +
-\beta_t v_tk_t^T
+\beta_t k_t^Tv_t
 $$
 
 其中 $`\alpha_t\in(0,1)`$ 控制 state decay。当 $`\alpha_t\rightarrow 1`$ 时，它接近 DeltaNet，保留历史并做定向更新；当 $`\alpha_t\rightarrow 0`$ 时，旧 state 被快速衰减，模型可以清理无关记忆。也就是说，GatedDeltaNet 把 memory clearance 和 key-value association learning 放进了同一个 recurrent update。
 
 <!-- 论文中的实际 block 还包含 Q/K/V projection、short convolution、SiLU、Q/K L2 norm、$`\alpha/\beta`$ projection 和 output gate。这些组件服务于语言建模稳定性和吞吐，不改变上面的核心递推。 -->
-
-#### 设计动机
-
-GatedDeltaNet 的设计动机来自三个缺口：
-
-- Vanilla linear attention 能把 KV Cache 压成矩阵 state，但缺少删除机制，长上下文下容易 memory overload。
-- Mamba2 这类 gated recurrent model 有遗忘能力，但它的 decay 更像对所有 association 做统一缩放，定向修改能力有限。
-- DeltaNet 有更强的 key-value association 更新能力，但缺少快速清空无关历史的 gate。
-
-GatedDeltaNet 的组合点正在这里：用 $`\alpha_t`$ 做 adaptive forgetting，用 $`\beta_t`$ 和 delta rule 做 targeted update。它牺牲了 softmax attention 的显式全历史检索，换来固定 state 形式的长上下文效率；所以在现代 LLM 中更常作为 softmax attention 的补充层，而不是完全替代所有 attention 层。
 
 #### 计算缓存分析
 
@@ -846,21 +835,27 @@ $$
 $$
 S_t
 \leftarrow
-S_{t-1}
-(
-\alpha_t(I-\beta_t k_tk_t^T)
-)
+\alpha_t\bigl(I-\beta_t k_t^Tk_t\bigr)S_{t-1}
 +
-\beta_t v_tk_t^T
+\beta_t k_t^Tv_t
 $$
 
 $$
-o_t=S_tq_t
+o_t=q_tS_t
 $$
 
 因此每步成本主要和 $`d_vd_k`$ 相关，而不是和历史长度 $`S`$ 相关。长上下文 decode 下，这能避免持续读取越来越大的 KV Cache，尤其适合 memory-bound 场景。
 
 训练阶段如果逐 token 串行递推，GPU 并行度会很差。GatedDeltaNet 论文沿用并扩展 DeltaNet 的 chunkwise parallel algorithm / WY representation，把 chunk 内递推改写成矩阵乘法，让训练能使用 tensor core。
+
+#### 与 Sparse Attention 的关系
+
+Dynamic sparse attention 和 linear attention 并不是在同一个维度上竞争。放到本文的框架里，可以理解为：
+
+- **Dynamic sparse attention** 更像是在降低 global attention 层的成本。它仍然保留历史 KV，只是用 indexer / selection 让当前 query 读取更少的 token 或 block；如果 selection 不漏掉关键信息，长上下文检索能力的下限相对更容易保障。
+- **Linear / recurrent attention** 更像是在替代或增强 local / recurrent mixing 层。它不像 SWA 那样只能看窗口内 token，而是把窗口外信息压进固定 state；效果取决于 update rule 能否高效利用有限 state。
+
+因此，DSA/CSA 这类 sparse attention 主要回答“global 层怎样更便宜”，GDN 主要回答“固定 state 的 local/recurrent 层怎样比 SWA 更有表达力”。二者更合理的关系不是互相替代，而是在 hybrid architecture 中组合：用 GDN 承担高频 token mixing 和压缩记忆，用少量 sparse/full attention 层补足精确检索能力。
 
 它的局限也来自同一个设计：固定大小 state 仍然可能发生 memory collision，不能无损替代 exact softmax attention；训练和推理也依赖专门的 linear/recurrent kernel。Qwen3-Next、Qwen3.5、Kimi Linear 这类模型采用的 3:1 linear/recurrent + softmax/MLA hybrid pattern，本质上就是在用 GDN 承担长期压缩记忆，用少量 softmax attention 层补足精确检索能力。
 
