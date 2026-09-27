@@ -1,23 +1,9 @@
 # LLM learning note
 
 
-
-## TODOs
-
-- FlashAttention:
+## FlashAttention:
 
 https://github.com/Dao-AILab/flash-attention
-
-- LLM.c
-
-https://github.com/karpathy/llm.c
-
-
-- GRPO
-
-
-- verl
-
 
 - megatron
 
@@ -26,13 +12,17 @@ https://github.com/karpathy/llm.c
 
 - VLM
 
+- 什么是YaRN?
+
+- model architectures
+
+- LLM quant
 
 - vLLM
 
-
+- CuteDSL
 
 - DeepSeek MLA
-
 
 - Common LLM architecture
 
@@ -65,7 +55,9 @@ https://pytorch.org/blog/a-primer-on-llm-post-training/?ajs_aid=dc955daa-52f8-49
 
 - model architecture
 
-
 - https://www.youtube.com/playlist?list=PLoROMvodv4rOY23Y0BoGoBGgQ1zmU_MT_
 
 
+- GRPO
+
+- verl
